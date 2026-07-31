@@ -10,6 +10,7 @@ import crypto from 'crypto'
 import multer from 'multer'
 import { fileURLToPath } from 'url'
 import { buildHasInvoiceMaskedItems, buildIbalticxMaskedItems, sendCustomerInfoEmail, sendEmail, sendHasInvoiceEmail, sendIbalticxEmail, sendNewsletterWinnerEmail, sendOutForDeliveryEmail, sendPaymentDeclinedEmail, sendPaymentReminderEmail, sendPaymentSuccessfulEmail, sendRefundInitiatedEmail } from './emailService.js'
+import { createDomainMiddleware } from './domainMiddleware.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -219,6 +220,33 @@ async function dbQueryConn(client, sql, params) {
   const isSelect = /^\s*(SELECT|WITH|SHOW)/i.test(sql.trim())
   if (isSelect) return [result.rows]
   return [{ affectedRows: result.rowCount ?? 0, rowCount: result.rowCount ?? 0, insertId: result.rows?.[0]?.id ?? null, rows: result.rows }]
+}
+
+const domainMiddleware = createDomainMiddleware({
+  lookupDomain: async (name) => {
+    const [rows] = await dbQuery('SELECT id, status FROM domains WHERE domain_name = $1', [name])
+    return rows[0] || null
+  },
+})
+app.use(domainMiddleware)
+
+// Admin-only explicit domain filter: unlike storefront services, admin callers
+// are the internal dashboard (not a storefront origin), so domain scoping here
+// must come from an explicit ?domain / ?domain_id query param, never Origin
+// auto-detection. Returns null when the caller didn't ask for a filter, which
+// must mean "no restriction" so the existing admin frontend keeps working.
+async function resolveAdminDomainFilter(req) {
+  const rawId = req.query?.domain_id
+  if (rawId != null && String(rawId).trim() !== '') {
+    const id = Number(rawId)
+    return Number.isFinite(id) && id > 0 ? id : null
+  }
+  const rawName = req.query?.domain
+  if (rawName) {
+    const [rows] = await dbQuery('SELECT id FROM domains WHERE domain_name = $1', [String(rawName).trim().toLowerCase()])
+    return rows[0]?.id ?? null
+  }
+  return null
 }
 
 let ORDERS_HAS_PAYMENT_PROCESSOR_COL = null
@@ -452,9 +480,9 @@ async function grantAffiliateRewardForReceivedOrder(connection, order, opts) {
     'INSERT INTO credit_ledger (user_id, amount, source, order_number, note, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
     [affiliateUserId, safeReward, 'affiliate_reward', orderNumber, `admin received: promo ${promoCode}`, nowMysqlDatetimeUtc()]
   )
-  await dbQueryConn(connection, 
-    'INSERT INTO promo_redemptions (order_id, order_number, promo_code, affiliate_user_id, customer_email, reward_amount, status, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-    [orderId, orderNumber, promoCode, affiliateUserId, customerEmail, safeReward, 'granted', nowMysqlDatetimeUtc()]
+  await dbQueryConn(connection,
+    'INSERT INTO promo_redemptions (order_id, order_number, promo_code, affiliate_user_id, customer_email, reward_amount, status, created_at, domain_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+    [orderId, orderNumber, promoCode, affiliateUserId, customerEmail, safeReward, 'granted', nowMysqlDatetimeUtc(), order?.domain_id ?? null]
   )
 
   console.log(`[admin/affiliate-grant ${orderNumber}] GRANTED £${safeReward.toFixed(2)} to user_id=${affiliateUserId} (promo=${promoCode})`)
@@ -562,9 +590,9 @@ async function applyAdminPaymentStatusUpdate({
             const expiresAt = addHoursMysql(24)
 
             await dbQuery(
-              `INSERT INTO payment_capture_requests (order_id, email, token_hash, expires_at, used_at, created_at)
-                VALUES ($1, $2, $3, $4, NULL, $5)`,
-              [Number(order.id), customerEmail, tokenHash, expiresAt, createdAt]
+              `INSERT INTO payment_capture_requests (order_id, email, token_hash, expires_at, used_at, created_at, domain_id)
+                VALUES ($1, $2, $3, $4, NULL, $5, $6)`,
+              [Number(order.id), customerEmail, tokenHash, expiresAt, createdAt, order?.domain_id ?? null]
             )
 
             const publicBase = env('PUBLIC_API_BASE_URL', env('PUBLIC_BASE_URL', '')).replace(/\/$/, '')
@@ -1725,6 +1753,7 @@ app.get('/api/admin/wholesale/orders', requireAuth, async (req, res) => {
     const safeStatus = allowed.includes(status) ? status : 'all'
     const limit = Math.min(Math.max(Number(req.query?.limit || 200), 1), 500)
     const offset = Math.max(Number(req.query?.offset || 0), 0)
+    const domainId = await resolveAdminDomainFilter(req)
 
     let sql = `SELECT
         id,
@@ -1749,6 +1778,7 @@ app.get('/api/admin/wholesale/orders', requireAuth, async (req, res) => {
         total_payment,
         received_payment,
         pending_payment,
+        domain_id,
         created_at
       FROM wholesale_orders`
     const params = []
@@ -1760,6 +1790,10 @@ app.get('/api/admin/wholesale/orders', requireAuth, async (req, res) => {
     if (country) {
       where.push('country = $1')
       params.push(country)
+    }
+    if (domainId != null) {
+      params.push(domainId)
+      where.push(`wholesale_orders.domain_id = $${params.length}`)
     }
     if (where.length) {
       sql += ' WHERE ' + where.join(' AND ')
@@ -1930,18 +1964,19 @@ app.post('/api/admin/wholesale/orders', requireAuth, async (req, res) => {
     const grandTotal  = toMoney(Math.max(0, subtotal - discountAmount))
     const orderCode   = `W${Date.now()}${crypto.randomBytes(3).toString('hex')}`.slice(0, 64)
     const adminId     = Number.isFinite(Number(req.adminUser?.id)) ? Number(req.adminUser.id) : null
+    const wholesaleDomainId = (await resolveAdminDomainFilter(req)) ?? req.domainId
 
     const [ins] = await dbQueryConn(
       connection,
       `INSERT INTO wholesale_orders (
         order_code, first_name, last_name, email, mobile, alt_mobile,
         address_line1, address_line2, city, state, country, postal_code,
-        delivery_date, notes, subtotal, discount_amount, grand_total, currency, status, created_by_admin_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'pending',$19) RETURNING id`,
+        delivery_date, notes, subtotal, discount_amount, grand_total, currency, status, created_by_admin_id, domain_id
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'pending',$19,$20) RETURNING id`,
       [orderCode, firstName, lastName, email, mobile, altMobile,
        address1, address2, city, state, country, postalCode,
        deliveryDate, notes, subtotal, discountAmount, grandTotal, currency,
-       adminId]
+       adminId, wholesaleDomainId ?? null]
     )
 
     const orderId = ins?.insertId
@@ -2367,13 +2402,14 @@ app.post('/api/admin/wholesale/orders-with-deduction', requireAuth, async (req, 
     // Create order
     const orderCode = `W${Date.now()}${crypto.randomBytes(3).toString('hex')}`.slice(0, 64)
     const adminId = req.adminUser?.id !== undefined && req.adminUser?.id !== null ? Number(req.adminUser.id) : null
+    const wholesaleDedupDomainId = (await resolveAdminDomainFilter(req)) ?? req.domainId
 
-    const [ins] = await dbQueryConn(connection, 
+    const [ins] = await dbQueryConn(connection,
       `INSERT INTO wholesale_orders (
         order_code, first_name, last_name, email, mobile, country,
         delivery_date, total_payment, received_payment, pending_payment,
-        grand_total, currency, status, created_by_admin_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'GBP', 'pending', $12) RETURNING id`,
+        grand_total, currency, status, created_by_admin_id, domain_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'GBP', 'pending', $12, $13) RETURNING id`,
       [
         orderCode,
         firstName,
@@ -2387,6 +2423,7 @@ app.post('/api/admin/wholesale/orders-with-deduction', requireAuth, async (req, 
         pendingPayment,
         totalPayment,
         Number.isFinite(adminId) ? adminId : null,
+        wholesaleDedupDomainId ?? null,
       ]
     )
 
@@ -2597,13 +2634,20 @@ app.get('/api/admin/affiliate-requests', requireAuth, async (req, res) => {
 
     const limit = Math.min(Math.max(Number(req.query?.limit || 200), 1), 500)
     const offset = Math.max(Number(req.query?.offset || 0), 0)
+    const domainId = await resolveAdminDomainFilter(req)
 
     let sql = `SELECT * FROM affiliate_requests`
     const params = []
+    const where = []
     if (safeStatus !== 'all') {
-      sql += ` WHERE status = $1`
       params.push(safeStatus)
+      where.push(`status = $${params.length}`)
     }
+    if (domainId != null) {
+      params.push(domainId)
+      where.push(`domain_id = $${params.length}`)
+    }
+    if (where.length) sql += ` WHERE ` + where.join(' AND ')
     sql += ` ORDER BY created_at DESC LIMIT ${Math.trunc(limit)} OFFSET ${Math.trunc(offset)}`
 
     const [rows] = await dbQuery(sql, params)
@@ -2660,26 +2704,27 @@ app.post('/api/admin/affiliate-requests/:id/approve', requireAuth, async (req, r
 
     const userName = String(reqRow?.user_name || '').trim()
     const promoCode = await generateUniqueAffiliatePromoCode(connection, userName, percent)
+    const affiliateDomainId = (await resolveAdminDomainFilter(req)) ?? req.domainId
 
-    await dbQueryConn(connection, 
-      `INSERT INTO promo_codes (code, percent, source, user_id, is_active, created_at)
-       VALUES ($1, $2, 'affiliate', $3, 1, $4)
+    await dbQueryConn(connection,
+      `INSERT INTO promo_codes (code, percent, source, user_id, is_active, created_at, domain_id)
+       VALUES ($1, $2, 'affiliate', $3, 1, $4, $5)
        ON CONFLICT (code) DO UPDATE SET percent = EXCLUDED.percent, is_active = 1, updated_at = CURRENT_TIMESTAMP`,
-      [promoCode, percent, userId, now]
+      [promoCode, percent, userId, now, affiliateDomainId ?? null]
     )
 
-    await dbQueryConn(connection, 
+    await dbQueryConn(connection,
       `UPDATE affiliate_requests
        SET status = 'approved', promo_code = $1, promo_percent = $2, admin_id = $3, admin_note = $4, decided_at = $5, updated_at = $6
        WHERE id = $7`,
       [promoCode, percent, Number.isFinite(adminId) ? adminId : null, adminNote, now, now, id]
     )
 
-    await dbQueryConn(connection, 
-      `INSERT INTO affiliates (user_id, promo_code, promo_percent, reward_amount, status, approved_at, created_at)
-       VALUES ($1, $2, $3, 10.00, 'approved', $4, $5)
+    await dbQueryConn(connection,
+      `INSERT INTO affiliates (user_id, promo_code, promo_percent, reward_amount, status, approved_at, created_at, domain_id)
+       VALUES ($1, $2, $3, 10.00, 'approved', $4, $5, $6)
        ON CONFLICT (user_id) DO UPDATE SET promo_code = EXCLUDED.promo_code, promo_percent = EXCLUDED.promo_percent, reward_amount = 10.00, status = 'approved', approved_at = EXCLUDED.approved_at, updated_at = CURRENT_TIMESTAMP`,
-      [userId, promoCode, percent, now, now]
+      [userId, promoCode, percent, now, now, affiliateDomainId ?? null]
     )
 
     dbQueryConn(connection, 'COMMIT')
@@ -2927,6 +2972,13 @@ app.get('/api/admin/affiliates', requireAuth, async (req, res) => {
 
     const limit = Math.min(Math.max(Number(req.query?.limit || 500), 1), 1000)
     const offset = Math.max(Number(req.query?.offset || 0), 0)
+    const domainId = await resolveAdminDomainFilter(req)
+    const domainParams = []
+    let domainWhereClause = ''
+    if (domainId != null) {
+      domainParams.push(domainId)
+      domainWhereClause = `WHERE a.domain_id = $${domainParams.length}`
+    }
 
     const sql = `
       SELECT
@@ -2958,11 +3010,12 @@ app.get('/api/admin/affiliates', requireAuth, async (req, res) => {
         FROM promo_redemptions
         GROUP BY affiliate_user_id
       ) r ON r.affiliate_user_id = a.user_id
+      ${domainWhereClause}
       ORDER BY a.created_at DESC
       LIMIT ${Math.trunc(limit)} OFFSET ${Math.trunc(offset)}
     `
 
-    const [rows] = await dbQuery(sql)
+    const [rows] = await dbQuery(sql, domainParams)
     return res.json({ affiliates: Array.isArray(rows) ? rows : [] })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Failed to fetch affiliates' })
@@ -3064,8 +3117,8 @@ app.post('/api/admin/affiliates/_backfill', requireAuth, async (req, res) => {
 
     connection = await pool.connect()
 
-    const [orders] = await dbQueryConn(connection, 
-      `SELECT o.id, o.order_number, o.customer_email, o.promo_code
+    const [orders] = await dbQueryConn(connection,
+      `SELECT o.id, o.order_number, o.customer_email, o.promo_code, o.domain_id
        FROM orders o
        LEFT JOIN promo_redemptions pr ON pr.order_id = o.id
        WHERE LOWER(o.payment_status) = 'received'
@@ -3140,9 +3193,9 @@ app.post('/api/admin/affiliates/_backfill', requireAuth, async (req, res) => {
           'INSERT INTO credit_ledger (user_id, amount, source, order_number, note, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
           [affiliateUserId, DEFAULT_REWARD, 'affiliate_reward', orderNumber, `backfill: promo ${promoCode} redeemed`, nowMysqlDatetime()]
         )
-        await dbQueryConn(connection, 
-          'INSERT INTO promo_redemptions (order_id, order_number, promo_code, affiliate_user_id, customer_email, reward_amount, status, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-          [orderId, orderNumber, promoCode, affiliateUserId, customerEmail, DEFAULT_REWARD, 'granted', nowMysqlDatetime()]
+        await dbQueryConn(connection,
+          'INSERT INTO promo_redemptions (order_id, order_number, promo_code, affiliate_user_id, customer_email, reward_amount, status, created_at, domain_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+          [orderId, orderNumber, promoCode, affiliateUserId, customerEmail, DEFAULT_REWARD, 'granted', nowMysqlDatetime(), order?.domain_id ?? null]
         )
         dbQueryConn(connection, 'COMMIT')
         entry.outcome = 'granted'
@@ -4083,17 +4136,18 @@ app.post('/api/admin/products', requireAuth, async (req, res) => {
     const [dupSlug] = await dbQueryConn(connection, 'SELECT id FROM products WHERE slug = $1', [slug])
     if (Array.isArray(dupSlug) && dupSlug.length > 0) slug = `${baseSlug}-${skuSlug}`
 
+    const productDomainId = (await resolveAdminDomainFilter(req)) ?? req.domainId
     const [insertResult] = await dbQueryConn(
       connection,
       `INSERT INTO products
          (name, slug, sku, price, currency, in_stock, stock_qty, image_url, image_alt,
           lab_test_url, short_desc, long_desc, details_contents, details_storage, details_delivery,
-          is_enabled, display_order)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+          is_enabled, display_order, domain_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        RETURNING id`,
       [name, slug, sku, price, currency, in_stock, stock_qty, image_url, image_alt,
        lab_test_url, short_desc, long_desc, details_contents, details_storage, details_delivery,
-       is_enabled, display_order]
+       is_enabled, display_order, productDomainId ?? null]
     )
 
     const newId = Number(insertResult?.insertId)
@@ -4407,6 +4461,14 @@ app.get('/api/admin/customers', requireAuth, async (req, res) => {
     const offset = Math.max(Number(req.query?.offset || 0), 0)
     const safeOffset = Number.isFinite(offset) ? Math.trunc(offset) : 0
 
+    const domainId = await resolveAdminDomainFilter(req)
+    const domainParams = []
+    let domainAndClause = ''
+    if (domainId != null) {
+      domainParams.push(domainId)
+      domainAndClause = `AND orders.domain_id = $${domainParams.length}`
+    }
+
     // NOTE: Some MySQL setups throw "Incorrect arguments to mysqld_stmt_execute" when
     // using prepared placeholders for LIMIT/OFFSET. We clamp + truncate to safe integers
     // above, then inline them here.
@@ -4427,9 +4489,11 @@ app.get('/api/admin/customers', requireAuth, async (req, res) => {
         ON LOWER(TRIM(u.email)) = LOWER(TRIM(orders.customer_email))
       WHERE customer_email IS NOT NULL
         AND TRIM(customer_email) <> ''
+        ${domainAndClause}
       GROUP BY LOWER(TRIM(customer_email))
       ORDER BY MAX(orders.created_at) DESC
-      LIMIT ${safeLimit + 1} OFFSET ${safeOffset}`
+      LIMIT ${safeLimit + 1} OFFSET ${safeOffset}`,
+      domainParams
     )
 
     const rawList = Array.isArray(rows) ? rows : []
@@ -6242,6 +6306,9 @@ app.post('/api/admin/orders', requireAuth, adminUpload.single('adminPaymentScree
     push('submitted_at', null)
     push('created_at', created_at)
 
+    const orderDomainId = (await resolveAdminDomainFilter(req)) ?? req.domainId
+    push('domain_id', orderDomainId ?? null)
+
     if (!insertCols.length) {
       dbQueryConn(connection, 'ROLLBACK')
       return res.status(500).json({ error: 'Order insert failed: no compatible columns detected' })
@@ -6268,10 +6335,10 @@ app.post('/api/admin/orders', requireAuth, adminUpload.single('adminPaymentScree
     }
 
     const provider_id = `ADMIN-${order_number}`
-    await dbQueryConn(connection, 
-      `INSERT INTO payments (order_id, provider, provider_id, amount, currency, status, raw_response, created_at)
-       VALUES ($1, 'Manual', $2, $3, $4, $5, NULL, $6)`,
-      [orderId, provider_id, total, currency, payment_status, created_at]
+    await dbQueryConn(connection,
+      `INSERT INTO payments (order_id, provider, provider_id, amount, currency, status, raw_response, created_at, domain_id)
+       VALUES ($1, 'Manual', $2, $3, $4, $5, NULL, $6, $7)`,
+      [orderId, provider_id, total, currency, payment_status, created_at, orderDomainId ?? null]
     )
 
     const [createdOrderRows] = await dbQueryConn(connection, 'SELECT * FROM orders WHERE id = $1', [orderId])
@@ -6304,9 +6371,18 @@ app.get('/api/admin/orders', requireAuth, async (req, res) => {
     const safeLimit = Number.isFinite(limit) ? Math.trunc(limit) : 200
     const safeOffset = Number.isFinite(offset) ? Math.trunc(offset) : 0
 
+    const domainId = await resolveAdminDomainFilter(req)
+    const domainParams = []
+    let domainWhereClause = ''
+    if (domainId != null) {
+      domainParams.push(domainId)
+      domainWhereClause = `WHERE orders.domain_id = $${domainParams.length}`
+    }
+
     const [rows] = await dbQuery(
       `SELECT
         orders.*,
+        d.domain_name,
         (
           SELECT p.status
           FROM payments p
@@ -6430,8 +6506,11 @@ app.get('/api/admin/orders', requireAuth, async (req, res) => {
           ))::bigint * 1000
         ) AS payment_date_ms
       FROM orders
+      LEFT JOIN domains d ON d.id = orders.domain_id
+      ${domainWhereClause}
       ORDER BY created_at DESC
-      LIMIT ${safeLimit} OFFSET ${safeOffset}`
+      LIMIT ${safeLimit} OFFSET ${safeOffset}`,
+      domainParams
     )
 
     const orders = Array.isArray(rows) ? rows : []
@@ -6455,7 +6534,7 @@ app.post('/api/admin/orders/bulk-capture-payment', requireAuth, async (req, res)
     for (const orderNumber of orderNumbers) {
       try {
         const [ordersRows] = await dbQuery(
-          'SELECT id, order_number, customer_email, customer_name, total, currency FROM orders WHERE order_number = $1',
+          'SELECT id, order_number, customer_email, customer_name, total, currency, domain_id FROM orders WHERE order_number = $1',
           [orderNumber]
         )
         const orders = Array.isArray(ordersRows) ? ordersRows : []
@@ -6491,9 +6570,9 @@ app.post('/api/admin/orders/bulk-capture-payment', requireAuth, async (req, res)
           connection = await pool.connect()
           dbQueryConn(connection, 'BEGIN')
           await dbQueryConn(connection, 
-            `INSERT INTO payment_capture_requests (order_id, email, token_hash, expires_at, used_at, created_at)
-              VALUES ($1, $2, $3, $4, NULL, $5)`,
-            [order.id, customerEmail, tokenHash, expiresAt, createdAt]
+            `INSERT INTO payment_capture_requests (order_id, email, token_hash, expires_at, used_at, created_at, domain_id)
+              VALUES ($1, $2, $3, $4, NULL, $5, $6)`,
+            [order.id, customerEmail, tokenHash, expiresAt, createdAt, order?.domain_id ?? null]
           )
           dbQueryConn(connection, 'COMMIT')
         } catch (e) {
@@ -6568,7 +6647,7 @@ app.post('/api/admin/orders/bulk-payment-reminder', requireAuth, async (req, res
     for (const orderNumber of orderNumbers) {
       try {
         const [ordersRows] = await dbQuery(
-          'SELECT id, order_number, customer_email, customer_name, total, currency FROM orders WHERE order_number = $1',
+          'SELECT id, order_number, customer_email, customer_name, total, currency, domain_id FROM orders WHERE order_number = $1',
           [orderNumber]
         )
         const orders = Array.isArray(ordersRows) ? ordersRows : []
@@ -6594,9 +6673,9 @@ app.post('/api/admin/orders/bulk-payment-reminder', requireAuth, async (req, res
           connection = await pool.connect()
           dbQueryConn(connection, 'BEGIN')
           await dbQueryConn(connection, 
-            `INSERT INTO payment_capture_requests (order_id, email, token_hash, expires_at, used_at, created_at)
-              VALUES ($1, $2, $3, $4, NULL, $5)`,
-            [order.id, customerEmail, tokenHash, expiresAt, createdAt]
+            `INSERT INTO payment_capture_requests (order_id, email, token_hash, expires_at, used_at, created_at, domain_id)
+              VALUES ($1, $2, $3, $4, NULL, $5, $6)`,
+            [order.id, customerEmail, tokenHash, expiresAt, createdAt, order?.domain_id ?? null]
           )
           dbQueryConn(connection, 'COMMIT')
         } catch (e) {
@@ -6732,6 +6811,7 @@ app.put('/api/admin/order/:id/items', requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid order id' })
+    const filterDomainId = await resolveAdminDomainFilter(req)
 
     const items = Array.isArray(req.body?.items) ? req.body.items : null
     if (!items) return res.status(400).json({ error: 'items array is required' })
@@ -6762,6 +6842,10 @@ app.put('/api/admin/order/:id/items', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'Order not found' })
     }
     const order = orders[0]
+    if (filterDomainId != null && order?.domain_id != null && Number(order.domain_id) !== filterDomainId) {
+      dbQueryConn(connection, 'ROLLBACK')
+      return res.status(409).json({ error: 'domain_mismatch', message: 'This order belongs to a different domain.' })
+    }
 
     const [existingRows] = await dbQueryConn(connection, 'SELECT * FROM order_items WHERE order_id = $1 FOR UPDATE', [id])
     const existing = Array.isArray(existingRows) ? existingRows : []
@@ -6847,6 +6931,7 @@ app.put('/api/admin/order/:id/promo', requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid order id' })
+    const filterDomainId = await resolveAdminDomainFilter(req)
 
     const promoCodeRaw = String(req.body?.promo_code || req.body?.promoCode || '').trim().toUpperCase()
     const promoMap = {
@@ -6887,6 +6972,10 @@ app.put('/api/admin/order/:id/promo', requireAuth, async (req, res) => {
     }
 
     const order = orders[0]
+    if (filterDomainId != null && order?.domain_id != null && Number(order.domain_id) !== filterDomainId) {
+      await dbQueryConn(connection, 'ROLLBACK')
+      return res.status(409).json({ error: 'domain_mismatch', message: 'This order belongs to a different domain.' })
+    }
     const subtotal = toMoney(order?.subtotal || 0)
     const shipping = toMoney(order?.shipping || 0)
     const discountAmount = percent > 0 ? toMoney(subtotal * (percent / 100)) : 0
@@ -6950,6 +7039,7 @@ app.put('/api/admin/order/:id/shipping', requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid order id' })
+    const filterDomainId = await resolveAdminDomainFilter(req)
 
     const address = normalizeAddressField(req.body?.shipping_address ?? req.body?.shippingAddress, 255)
     const city = normalizeAddressField(req.body?.shipping_city ?? req.body?.shippingCity, 120)
@@ -6977,6 +7067,10 @@ app.put('/api/admin/order/:id/shipping', requireAuth, async (req, res) => {
     if (!orders.length) {
       dbQueryConn(connection, 'ROLLBACK')
       return res.status(404).json({ error: 'Order not found' })
+    }
+    if (filterDomainId != null && orders[0]?.domain_id != null && Number(orders[0].domain_id) !== filterDomainId) {
+      dbQueryConn(connection, 'ROLLBACK')
+      return res.status(409).json({ error: 'domain_mismatch', message: 'This order belongs to a different domain.' })
     }
 
     const sets = ['updated_at = CURRENT_TIMESTAMP']
@@ -7033,6 +7127,15 @@ app.put('/api/admin/order/:id/payment-status', requireAuth, async (req, res) => 
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid order id' })
+
+    const filterDomainId = await resolveAdminDomainFilter(req)
+    if (filterDomainId != null) {
+      const [domainCheckRows] = await dbQuery('SELECT domain_id FROM orders WHERE id = $1', [id])
+      const existingDomainId = domainCheckRows?.[0]?.domain_id
+      if (existingDomainId != null && Number(existingDomainId) !== filterDomainId) {
+        return res.status(409).json({ error: 'domain_mismatch', message: 'This order belongs to a different domain.' })
+      }
+    }
 
     const nextStatusRaw = String(req.body?.payment_status ?? req.body?.paymentStatus ?? '').trim().toLowerCase()
     const allowed = ['received', 'rejected']
@@ -7133,12 +7236,17 @@ app.put('/api/admin/order/:id/status', requireAuth, async (req, res) => {
       ? String(trackingNumber).replace(/\s+/g, '').trim().toUpperCase()
       : ''
 
+    const filterDomainId = await resolveAdminDomainFilter(req)
+
     const [beforeRows] = await dbQuery(
-      'SELECT order_number, customer_email, customer_name, shipping_address, shipping_city, shipping_state, shipping_zip, shipping_country, status AS current_status, tracking_number AS current_tracking_number FROM orders WHERE id = $1',
+      'SELECT order_number, customer_email, customer_name, shipping_address, shipping_city, shipping_state, shipping_zip, shipping_country, status AS current_status, tracking_number AS current_tracking_number, domain_id FROM orders WHERE id = $1',
       [id]
     )
     const beforeOrder = Array.isArray(beforeRows) && beforeRows[0] ? beforeRows[0] : null
     if (!beforeOrder) return res.status(404).json({ error: 'Order not found' })
+    if (filterDomainId != null && beforeOrder?.domain_id != null && Number(beforeOrder.domain_id) !== filterDomainId) {
+      return res.status(409).json({ error: 'domain_mismatch', message: 'This order belongs to a different domain.' })
+    }
 
     const normalizedPaymentStatus = paymentStatus !== undefined && paymentStatus !== null ? String(paymentStatus).trim().toLowerCase() : ''
     const normalizedReason = paymentRejectionReason !== undefined && paymentRejectionReason !== null
@@ -7245,6 +7353,15 @@ app.delete('/api/admin/order/:id', requireAuth, async (req, res) => {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid order id' })
 
+    const filterDomainId = await resolveAdminDomainFilter(req)
+    if (filterDomainId != null) {
+      const [domainCheckRows] = await dbQuery('SELECT domain_id FROM orders WHERE id = $1', [id])
+      const existingDomainId = domainCheckRows?.[0]?.domain_id
+      if (existingDomainId != null && Number(existingDomainId) !== filterDomainId) {
+        return res.status(409).json({ error: 'domain_mismatch', message: 'This order belongs to a different domain.' })
+      }
+    }
+
     // order_items + payments are expected to cascade via FK constraints.
     const [result] = await dbQuery('DELETE FROM orders WHERE id = $1', [id])
     const affected = result?.affectedRows || 0
@@ -7263,7 +7380,7 @@ app.post('/api/admin/orders/:orderNumber/capture-payment', requireAuth, async (r
     const orderNumber = String(req.params.orderNumber || '').trim()
     if (!orderNumber) return res.status(400).json({ error: 'orderNumber is required' })
 
-    const [ordersRows] = await dbQuery('SELECT id, order_number, customer_email, customer_name, total, currency FROM orders WHERE order_number = $1', [orderNumber])
+    const [ordersRows] = await dbQuery('SELECT id, order_number, customer_email, customer_name, total, currency, domain_id FROM orders WHERE order_number = $1', [orderNumber])
     const orders = Array.isArray(ordersRows) ? ordersRows : []
     if (!orders.length) return res.status(404).json({ error: 'Order not found' })
     const order = orders[0]
@@ -7280,9 +7397,9 @@ app.post('/api/admin/orders/:orderNumber/capture-payment', requireAuth, async (r
     dbQueryConn(connection, 'BEGIN')
 
     await dbQueryConn(connection, 
-      `INSERT INTO payment_capture_requests (order_id, email, token_hash, expires_at, used_at, created_at)
-        VALUES ($1, $2, $3, $4, NULL, $5)`,
-      [order.id, customerEmail, tokenHash, expiresAt, createdAt]
+      `INSERT INTO payment_capture_requests (order_id, email, token_hash, expires_at, used_at, created_at, domain_id)
+        VALUES ($1, $2, $3, $4, NULL, $5, $6)`,
+      [order.id, customerEmail, tokenHash, expiresAt, createdAt, order?.domain_id ?? null]
     )
 
     dbQueryConn(connection, 'COMMIT')
@@ -8433,6 +8550,11 @@ app.get('/api/admin/newsletter', requireAuth, async (req, res) => {
       where.push('created_at <= $1')
       params.push(to.length === 10 ? `${to} 23:59:59` : to)
     }
+    const domainId = await resolveAdminDomainFilter(req)
+    if (domainId != null) {
+      params.push(domainId)
+      where.push(`domain_id = $${params.length}`)
+    }
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
     const [countRows] = await dbQuery(
@@ -8528,6 +8650,8 @@ app.get('/api/admin/newsletter/export.csv', requireAuth, async (req, res) => {
     if (q) { where.push('email LIKE $1'); params.push(`%${q}%`) }
     if (from) { where.push('created_at >= $1'); params.push(from.length === 10 ? `${from} 00:00:00` : from) }
     if (to) { where.push('created_at <= $1'); params.push(to.length === 10 ? `${to} 23:59:59` : to) }
+    const domainId = await resolveAdminDomainFilter(req)
+    if (domainId != null) { params.push(domainId); where.push(`domain_id = $${params.length}`) }
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
     const [rows] = await dbQuery(
