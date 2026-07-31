@@ -249,6 +249,425 @@ async function resolveAdminDomainFilter(req) {
   return null
 }
 
+app.get('/api/admin/domains', requireAuth, async (_req, res) => {
+  try {
+    const [rows] = await dbQuery('SELECT id, domain_name, status FROM domains ORDER BY domain_name ASC')
+    return res.json({ success: true, domains: rows })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Failed to fetch domains' })
+  }
+})
+
+// ─── Dashboard: KPI / analytics endpoints ────────────────────────────────
+// All domain-scoped via resolveAdminDomainFilter (?domain / ?domain_id), same
+// convention as every other admin-scoped endpoint. `products` has no
+// domain_id column (catalog is global), so inventory figures are store-wide
+// regardless of the domain filter.
+const DASHBOARD_RECEIVED_STATUSES = [
+  'paid', 'succeeded', 'success', 'completed', 'complete', 'captured', 'approved', 'verified', 'received',
+]
+const DASHBOARD_FAILED_STATUSES = [
+  'rejected', 'reject', 'declined', 'denied', 'failed', 'cancelled', 'canceled',
+]
+const LOW_STOCK_THRESHOLD = 5
+
+app.get('/api/admin/dashboard/summary', requireAuth, async (req, res) => {
+  try {
+    const domainId = await resolveAdminDomainFilter(req)
+    const ordersDomainParams = domainId != null ? [domainId] : []
+    const ordersDomainClause = domainId != null ? 'AND domain_id = $1' : ''
+
+    const [todayRows] = await dbQuery(
+      `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE created_at >= CURRENT_DATE ${ordersDomainClause}`,
+      ordersDomainParams
+    )
+    const [weekRows] = await dbQuery(
+      `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE created_at >= (CURRENT_DATE - INTERVAL '6 days') ${ordersDomainClause}`,
+      ordersDomainParams
+    )
+    const [monthRows] = await dbQuery(
+      `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE created_at >= date_trunc('month', CURRENT_DATE) ${ordersDomainClause}`,
+      ordersDomainParams
+    )
+    const [aovRows] = await dbQuery(
+      `SELECT COALESCE(AVG(total),0) AS avg_order_value FROM orders WHERE 1=1 ${ordersDomainClause}`,
+      ordersDomainParams
+    )
+    const [customerRows] = await dbQuery(
+      `SELECT
+         COUNT(*) AS total_customers,
+         COUNT(*) FILTER (WHERE first_order_at >= (NOW() - INTERVAL '30 days')) AS new_customers_30d
+       FROM (
+         SELECT LOWER(TRIM(customer_email)) AS email, MIN(created_at) AS first_order_at
+         FROM orders
+         WHERE customer_email IS NOT NULL AND TRIM(customer_email) <> '' ${ordersDomainClause}
+         GROUP BY LOWER(TRIM(customer_email))
+       ) c`,
+      ordersDomainParams
+    )
+    const [orderStatusRows] = await dbQuery(
+      `SELECT
+         COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS new_today,
+         COUNT(*) FILTER (WHERE LOWER(status) = 'pending') AS pending,
+         COUNT(*) FILTER (WHERE LOWER(status) = 'in_progress') AS processing,
+         COUNT(*) FILTER (WHERE LOWER(status) = 'delivered') AS delivered,
+         COUNT(*) FILTER (WHERE LOWER(status) = 'cancelled') AS cancelled,
+         COUNT(*) AS total
+       FROM orders WHERE 1=1 ${ordersDomainClause}`,
+      ordersDomainParams
+    )
+
+    const successParams = [...DASHBOARD_RECEIVED_STATUSES]
+    let successDomainClause = ''
+    if (domainId != null) { successParams.push(domainId); successDomainClause = `AND o.domain_id = $${successParams.length}` }
+    const successPlaceholders = DASHBOARD_RECEIVED_STATUSES.map((_, i) => '$' + (i + 1)).join(',')
+    const [successRows] = await dbQuery(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(pay.amount),0) AS amount FROM payments pay INNER JOIN orders o ON o.id = pay.order_id
+       WHERE LOWER(pay.status) IN (${successPlaceholders}) ${successDomainClause}`,
+      successParams
+    )
+
+    const failedParams = [...DASHBOARD_FAILED_STATUSES]
+    let failedDomainClause = ''
+    if (domainId != null) { failedParams.push(domainId); failedDomainClause = `AND o.domain_id = $${failedParams.length}` }
+    const failedPlaceholders = DASHBOARD_FAILED_STATUSES.map((_, i) => '$' + (i + 1)).join(',')
+    const [failedRows] = await dbQuery(
+      `SELECT COUNT(*) AS count FROM payments pay INNER JOIN orders o ON o.id = pay.order_id
+       WHERE LOWER(pay.status) IN (${failedPlaceholders}) ${failedDomainClause}`,
+      failedParams
+    )
+
+    const refundParams = []
+    let refundDomainClause = ''
+    if (domainId != null) { refundParams.push(domainId); refundDomainClause = `AND o.domain_id = $${refundParams.length}` }
+    const [refundRows] = await dbQuery(
+      `SELECT COALESCE(SUM(pay.amount),0) AS amount, COUNT(*) AS count
+       FROM payments pay INNER JOIN orders o ON o.id = pay.order_id
+       WHERE LOWER(pay.status) = 'refunded' ${refundDomainClause}`,
+      refundParams
+    )
+
+    const [outstandingRows] = await dbQuery(
+      `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders
+       WHERE LOWER(payment_status) IN ('pending','unpaid') ${ordersDomainClause}`,
+      ordersDomainParams
+    )
+
+    const linksParams = []
+    let linksDomainClause = ''
+    if (domainId != null) { linksParams.push(domainId); linksDomainClause = `AND domain_id = $${linksParams.length}` }
+    const [pendingLinksRows] = await dbQuery(
+      `SELECT COUNT(*) AS count FROM payment_capture_requests
+       WHERE used_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) ${linksDomainClause}`,
+      linksParams
+    )
+
+    const [inventoryRows] = await dbQuery(
+      `SELECT
+         COUNT(*) AS total_products,
+         COUNT(*) FILTER (WHERE is_enabled::text IN ('1','true','t')) AS active_products,
+         COUNT(*) FILTER (WHERE stock_qty IS NOT NULL AND stock_qty > 0 AND stock_qty <= ${LOW_STOCK_THRESHOLD}) AS low_stock_products,
+         COUNT(*) FILTER (WHERE in_stock::text IN ('0','false','f') OR stock_qty = 0) AS out_of_stock_products
+       FROM products`
+    )
+
+    const row0 = (rows) => (Array.isArray(rows) && rows[0]) ? rows[0] : {}
+    const today = row0(todayRows)
+    const week = row0(weekRows)
+    const month = row0(monthRows)
+    const aov = row0(aovRows)
+    const cust = row0(customerRows)
+    const ord = row0(orderStatusRows)
+    const inv = row0(inventoryRows)
+
+    return res.json({
+      sales: {
+        todaySales: Number(today.amount || 0),
+        todayOrders: Number(today.count || 0),
+        weekSales: Number(week.amount || 0),
+        weekOrders: Number(week.count || 0),
+        monthSales: Number(month.amount || 0),
+        monthOrders: Number(month.count || 0),
+        avgOrderValue: Number(aov.avg_order_value || 0),
+        totalCustomers: Number(cust.total_customers || 0),
+        newCustomers30d: Number(cust.new_customers_30d || 0),
+      },
+      orders: {
+        newToday: Number(ord.new_today || 0),
+        pending: Number(ord.pending || 0),
+        processing: Number(ord.processing || 0),
+        delivered: Number(ord.delivered || 0),
+        cancelled: Number(ord.cancelled || 0),
+        total: Number(ord.total || 0),
+      },
+      payments: {
+        successfulCount: Number(row0(successRows).count || 0),
+        successfulAmount: Number(row0(successRows).amount || 0),
+        failedCount: Number(row0(failedRows).count || 0),
+        refundAmount: Number(row0(refundRows).amount || 0),
+        refundCount: Number(row0(refundRows).count || 0),
+        outstandingAmount: Number(row0(outstandingRows).amount || 0),
+        outstandingCount: Number(row0(outstandingRows).count || 0),
+        pendingPaymentLinks: Number(row0(pendingLinksRows).count || 0),
+      },
+      inventory: {
+        totalProducts: Number(inv.total_products || 0),
+        activeProducts: Number(inv.active_products || 0),
+        lowStockProducts: Number(inv.low_stock_products || 0),
+        outOfStockProducts: Number(inv.out_of_stock_products || 0),
+        lowStockThreshold: LOW_STOCK_THRESHOLD,
+      },
+    })
+  } catch (e) {
+    console.error('[admin-service] /api/admin/dashboard/summary failed:', e?.message || e)
+    return res.status(500).json({ error: e?.message || 'Failed to fetch dashboard summary' })
+  }
+})
+
+app.get('/api/admin/dashboard/trend', requireAuth, async (req, res) => {
+  try {
+    const daysRaw = Number(req.query?.days || 30)
+    const days = Number.isFinite(daysRaw) ? Math.min(Math.max(Math.trunc(daysRaw), 1), 90) : 30
+    const domainId = await resolveAdminDomainFilter(req)
+
+    const params = [days]
+    let domainClause = ''
+    if (domainId != null) { params.push(domainId); domainClause = `AND domain_id = $${params.length}` }
+    const [rows] = await dbQuery(
+      `SELECT DATE(created_at) AS day, COALESCE(SUM(total),0) AS revenue, COUNT(*) AS orders
+       FROM orders
+       WHERE created_at >= (CURRENT_DATE - ($1 * INTERVAL '1 day')) ${domainClause}
+       GROUP BY DATE(created_at)
+       ORDER BY day ASC`,
+      params
+    )
+
+    const prevParams = [days]
+    let prevDomainClause = ''
+    if (domainId != null) { prevParams.push(domainId); prevDomainClause = `AND domain_id = $${prevParams.length}` }
+    const [prevRows] = await dbQuery(
+      `SELECT COALESCE(SUM(total),0) AS revenue, COUNT(*) AS orders
+       FROM orders
+       WHERE created_at >= (CURRENT_DATE - ($1 * 2 * INTERVAL '1 day'))
+         AND created_at < (CURRENT_DATE - ($1 * INTERVAL '1 day')) ${prevDomainClause}`,
+      prevParams
+    )
+
+    const series = (Array.isArray(rows) ? rows : []).map((r) => ({
+      date: r.day instanceof Date ? r.day.toISOString().slice(0, 10) : String(r.day),
+      revenue: Number(r.revenue || 0),
+      orders: Number(r.orders || 0),
+    }))
+    const current = series.reduce((acc, r) => ({ revenue: acc.revenue + r.revenue, orders: acc.orders + r.orders }), { revenue: 0, orders: 0 })
+    const prev = (Array.isArray(prevRows) && prevRows[0]) ? prevRows[0] : { revenue: 0, orders: 0 }
+    const previous = { revenue: Number(prev.revenue || 0), orders: Number(prev.orders || 0) }
+    const pctChange = (curr, prior) => (prior > 0 ? ((curr - prior) / prior) * 100 : null)
+
+    return res.json({
+      series,
+      current,
+      previous,
+      revenueChangePct: pctChange(current.revenue, previous.revenue),
+      ordersChangePct: pctChange(current.orders, previous.orders),
+    })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Failed to fetch trend' })
+  }
+})
+
+app.get('/api/admin/dashboard/customer-growth', requireAuth, async (req, res) => {
+  try {
+    const daysRaw = Number(req.query?.days || 90)
+    const days = Number.isFinite(daysRaw) ? Math.min(Math.max(Math.trunc(daysRaw), 7), 365) : 90
+    const domainId = await resolveAdminDomainFilter(req)
+
+    const params = [days]
+    let domainClause = ''
+    if (domainId != null) { params.push(domainId); domainClause = `AND domain_id = $${params.length}` }
+
+    const [rows] = await dbQuery(
+      `SELECT DATE(first_order_at) AS day, COUNT(*) AS new_customers
+       FROM (
+         SELECT LOWER(TRIM(customer_email)) AS email, MIN(created_at) AS first_order_at
+         FROM orders
+         WHERE customer_email IS NOT NULL AND TRIM(customer_email) <> '' ${domainClause}
+         GROUP BY LOWER(TRIM(customer_email))
+       ) c
+       WHERE first_order_at >= (CURRENT_DATE - ($1 * INTERVAL '1 day'))
+       GROUP BY DATE(first_order_at)
+       ORDER BY day ASC`,
+      params
+    )
+
+    const series = (Array.isArray(rows) ? rows : []).map((r) => ({
+      date: r.day instanceof Date ? r.day.toISOString().slice(0, 10) : String(r.day),
+      newCustomers: Number(r.new_customers || 0),
+    }))
+
+    return res.json({ series })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Failed to fetch customer growth' })
+  }
+})
+
+app.get('/api/admin/dashboard/top-products', requireAuth, async (req, res) => {
+  try {
+    const limitRaw = Number(req.query?.limit || 6)
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 20) : 6
+    const sortDir = String(req.query?.sort || 'top').toLowerCase() === 'low' ? 'ASC' : 'DESC'
+    const domainId = await resolveAdminDomainFilter(req)
+
+    const params = []
+    let qtyExpr = 'COALESCE(SUM(oi.quantity),0)'
+    let revExpr = 'COALESCE(SUM(oi.line_total),0)'
+    if (domainId != null) {
+      params.push(domainId)
+      qtyExpr = `COALESCE(SUM(oi.quantity) FILTER (WHERE o.domain_id = $${params.length}), 0)`
+      revExpr = `COALESCE(SUM(oi.line_total) FILTER (WHERE o.domain_id = $${params.length}), 0)`
+    }
+
+    const [rows] = await dbQuery(
+      `SELECT
+         p.id AS product_id,
+         p.name,
+         p.sku,
+         p.image_url,
+         ${qtyExpr} AS units_sold,
+         ${revExpr} AS revenue
+       FROM products p
+       LEFT JOIN order_items oi ON oi.product_id = p.id
+       LEFT JOIN orders o ON o.id = oi.order_id
+       WHERE p.is_enabled::text IN ('1','true','t')
+       GROUP BY p.id, p.name, p.sku, p.image_url
+       ORDER BY revenue ${sortDir}
+       LIMIT ${limit}`,
+      params
+    )
+    return res.json({ products: Array.isArray(rows) ? rows : [] })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Failed to fetch top products' })
+  }
+})
+
+app.get('/api/admin/dashboard/inventory', requireAuth, async (_req, res) => {
+  try {
+    const [lowStockRows] = await dbQuery(
+      `SELECT id, name, sku, image_url, stock_qty, is_enabled
+       FROM products
+       WHERE stock_qty IS NOT NULL AND stock_qty > 0 AND stock_qty <= ${LOW_STOCK_THRESHOLD}
+       ORDER BY stock_qty ASC LIMIT 20`
+    )
+    const [outOfStockRows] = await dbQuery(
+      `SELECT id, name, sku, image_url, stock_qty, is_enabled
+       FROM products
+       WHERE in_stock::text IN ('0','false','f') OR stock_qty = 0
+       ORDER BY updated_at DESC LIMIT 20`
+    )
+    const [recentRows] = await dbQuery(
+      `SELECT id, name, sku, image_url, stock_qty, is_enabled, created_at
+       FROM products
+       ORDER BY created_at DESC LIMIT 8`
+    )
+    return res.json({
+      lowStockThreshold: LOW_STOCK_THRESHOLD,
+      lowStock: Array.isArray(lowStockRows) ? lowStockRows : [],
+      outOfStock: Array.isArray(outOfStockRows) ? outOfStockRows : [],
+      recentlyAdded: Array.isArray(recentRows) ? recentRows : [],
+    })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Failed to fetch inventory' })
+  }
+})
+
+app.get('/api/admin/dashboard/payment-methods', requireAuth, async (req, res) => {
+  try {
+    const domainId = await resolveAdminDomainFilter(req)
+    const params = []
+    let domainClause = ''
+    if (domainId != null) { params.push(domainId); domainClause = `AND o.domain_id = $${params.length}` }
+    const [rows] = await dbQuery(
+      `SELECT COALESCE(NULLIF(TRIM(pay.provider), ''), 'Manual') AS provider, COUNT(*) AS count, COALESCE(SUM(pay.amount),0) AS amount
+       FROM payments pay
+       INNER JOIN orders o ON o.id = pay.order_id
+       WHERE 1=1 ${domainClause}
+       GROUP BY COALESCE(NULLIF(TRIM(pay.provider), ''), 'Manual')
+       ORDER BY amount DESC`,
+      params
+    )
+    return res.json({ methods: Array.isArray(rows) ? rows : [] })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Failed to fetch payment methods' })
+  }
+})
+
+app.get('/api/admin/dashboard/activity', requireAuth, async (req, res) => {
+  try {
+    const limitRaw = Number(req.query?.limit || 15)
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 50) : 15
+    const domainId = await resolveAdminDomainFilter(req)
+
+    const orderParams = []
+    let orderDomainClause = ''
+    if (domainId != null) { orderParams.push(domainId); orderDomainClause = `AND domain_id = $${orderParams.length}` }
+    const [orderRows] = await dbQuery(
+      `SELECT id, order_number, customer_name, customer_email, total, currency, created_at
+       FROM orders WHERE 1=1 ${orderDomainClause}
+       ORDER BY created_at DESC LIMIT ${limit}`,
+      orderParams
+    )
+
+    const paymentParams = [...DASHBOARD_RECEIVED_STATUSES]
+    let paymentDomainClause = ''
+    if (domainId != null) { paymentParams.push(domainId); paymentDomainClause = `AND o.domain_id = $${paymentParams.length}` }
+    const paymentPlaceholders = DASHBOARD_RECEIVED_STATUSES.map((_, i) => '$' + (i + 1)).join(',')
+    const [paymentRows] = await dbQuery(
+      `SELECT pay.id, pay.order_id, o.order_number, pay.amount, pay.currency, pay.status, pay.created_at
+       FROM payments pay
+       INNER JOIN orders o ON o.id = pay.order_id
+       WHERE LOWER(pay.status) IN (${paymentPlaceholders}) ${paymentDomainClause}
+       ORDER BY pay.created_at DESC LIMIT ${limit}`,
+      paymentParams
+    )
+
+    const [productRows] = await dbQuery(
+      `SELECT id, name, sku, created_at FROM products ORDER BY created_at DESC LIMIT ${limit}`
+    )
+
+    const activity = [
+      ...(Array.isArray(orderRows) ? orderRows : []).map((r) => ({
+        type: 'order',
+        id: `order-${r.id}`,
+        title: `New order ${r.order_number}`,
+        detail: r.customer_name || r.customer_email || 'Customer',
+        amount: Number(r.total || 0),
+        currency: r.currency,
+        at: r.created_at,
+      })),
+      ...(Array.isArray(paymentRows) ? paymentRows : []).map((r) => ({
+        type: 'payment',
+        id: `payment-${r.id}`,
+        title: `Payment received — ${r.order_number}`,
+        detail: r.status,
+        amount: Number(r.amount || 0),
+        currency: r.currency,
+        at: r.created_at,
+      })),
+      ...(Array.isArray(productRows) ? productRows : []).map((r) => ({
+        type: 'product',
+        id: `product-${r.id}`,
+        title: `Product added — ${r.name}`,
+        detail: r.sku,
+        at: r.created_at,
+      })),
+    ]
+    activity.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+
+    return res.json({ activity: activity.slice(0, limit) })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Failed to fetch activity' })
+  }
+})
+
 let ORDERS_HAS_PAYMENT_PROCESSOR_COL = null
 let ORDERS_HAS_BANK_ACCOUNT_USED_COL = null
 let ORDERS_COLUMNS = null
@@ -4991,33 +5410,55 @@ app.get('/api/admin/verify', requireAuth, async (req, res) => {
 
 app.get('/api/admin/stats', requireAuth, async (req, res) => {
   try {
-    const [ordersRows] = await dbQuery('SELECT COUNT(*) as count, COALESCE(SUM(total),0) as revenue FROM orders')
-    const [pendingRows] = await dbQuery(`SELECT COUNT(*) as count FROM orders WHERE status = 'pending'`)
-    const [completedRows] = await dbQuery(`SELECT COUNT(*) as count FROM orders WHERE status IN ('delivered','completed') OR payment_status = 'paid'`)
+    const domainId = await resolveAdminDomainFilter(req)
+    const domainOrdersWhere = domainId != null ? 'AND domain_id = $1' : ''
+    const domainOrdersParams = domainId != null ? [domainId] : []
+    const domainLinksWhere = domainId != null ? 'AND domain_id = $1' : ''
+    const domainLinksParams = domainId != null ? [domainId] : []
+
+    const [ordersRows] = await dbQuery(
+      `SELECT COUNT(*) as count, COALESCE(SUM(total),0) as revenue FROM orders WHERE 1=1 ${domainOrdersWhere}`,
+      domainOrdersParams
+    )
+    const [pendingRows] = await dbQuery(
+      `SELECT COUNT(*) as count FROM orders WHERE status = 'pending' ${domainOrdersWhere}`,
+      domainOrdersParams
+    )
+    const [completedRows] = await dbQuery(
+      `SELECT COUNT(*) as count FROM orders WHERE (status IN ('delivered','completed') OR payment_status = 'paid') ${domainOrdersWhere}`,
+      domainOrdersParams
+    )
 
     const [pendingPaymentsRows] = await dbQuery(
-      `SELECT COALESCE(SUM(total),0) as amount FROM orders WHERE LOWER(payment_status) IN ('pending','unpaid')`
+      `SELECT COALESCE(SUM(total),0) as amount FROM orders WHERE LOWER(payment_status) IN ('pending','unpaid') ${domainOrdersWhere}`,
+      domainOrdersParams
     )
     const [completedPaymentsRows] = await dbQuery(
-      `SELECT COALESCE(SUM(total),0) as amount FROM orders WHERE LOWER(payment_status) = 'received'`
+      `SELECT COALESCE(SUM(total),0) as amount FROM orders WHERE LOWER(payment_status) = 'received' ${domainOrdersWhere}`,
+      domainOrdersParams
     )
 
     const [paymentLinks1hRows] = await dbQuery(
-      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '1 hour')`
+      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '1 hour') ${domainLinksWhere}`,
+      domainLinksParams
     )
     const [paymentLinks12hRows] = await dbQuery(
-      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '12 hours')`
+      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '12 hours') ${domainLinksWhere}`,
+      domainLinksParams
     )
     const [paymentLinks24hRows] = await dbQuery(
-      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '24 hours')`
+      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '24 hours') ${domainLinksWhere}`,
+      domainLinksParams
     )
 
     const [paymentLinks7dRows] = await dbQuery(
-      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '7 days')`
+      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '7 days') ${domainLinksWhere}`,
+      domainLinksParams
     )
 
     const [paymentLinksTotalRows] = await dbQuery(
-      'SELECT COUNT(*) as count FROM payment_capture_requests'
+      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE 1=1 ${domainLinksWhere}`,
+      domainLinksParams
     )
 
     const sinceRaw = req.query?.since
@@ -5540,6 +5981,10 @@ app.get('/api/admin/stats/weekly', requireAuth, async (req, res) => {
       orders.created_at
     )`
 
+    const domainId = await resolveAdminDomainFilter(req)
+    const domainWeeklyWhere = domainId != null ? 'AND orders.domain_id = $11' : ''
+    const domainWeeklyParams = domainId != null ? [domainId] : []
+
     const [rows] = await dbQuery(
       `SELECT
         orders.id,
@@ -5551,9 +5996,10 @@ app.get('/api/admin/stats/weekly', requireAuth, async (req, res) => {
         orders.created_at,
         ${paymentDateExpr} AS payment_date
        FROM orders
-       WHERE orders.created_at >= (NOW() - ($10 * INTERVAL '1 day'))
-          OR ${paymentDateExpr} >= (NOW() - ($10 * INTERVAL '1 day'))`,
-      [...receivedStatuses, days]
+       WHERE (orders.created_at >= (NOW() - ($10 * INTERVAL '1 day'))
+          OR ${paymentDateExpr} >= (NOW() - ($10 * INTERVAL '1 day')))
+          ${domainWeeklyWhere}`,
+      [...receivedStatuses, days, ...domainWeeklyParams]
     )
 
     const isReceived = (raw) => {
@@ -6514,7 +6960,14 @@ app.get('/api/admin/orders', requireAuth, async (req, res) => {
     )
 
     const orders = Array.isArray(rows) ? rows : []
-    return res.json({ orders })
+
+    const [countRows] = await dbQuery(
+      `SELECT COUNT(*)::int AS total FROM orders ${domainWhereClause}`,
+      domainParams
+    )
+    const total = countRows?.[0]?.total ?? 0
+
+    return res.json({ orders, total })
   } catch (e) {
     return res.status(500).json({ error: 'Failed to fetch orders' })
   }
