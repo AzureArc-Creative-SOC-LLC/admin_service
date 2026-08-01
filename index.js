@@ -235,6 +235,11 @@ app.use(domainMiddleware)
 // must come from an explicit ?domain / ?domain_id query param, never Origin
 // auto-detection. Returns null when the caller didn't ask for a filter, which
 // must mean "no restriction" so the existing admin frontend keeps working.
+// Domain name -> id barely ever changes, so a short in-process cache avoids
+// re-querying it on every single admin request (each request resolves it once).
+const DOMAIN_ID_CACHE_TTL_MS = envInt('DOMAIN_ID_CACHE_TTL_MS', 5 * 60 * 1000)
+const domainIdCache = new Map()
+
 async function resolveAdminDomainFilter(req) {
   const rawId = req.query?.domain_id
   if (rawId != null && String(rawId).trim() !== '') {
@@ -243,10 +248,35 @@ async function resolveAdminDomainFilter(req) {
   }
   const rawName = req.query?.domain
   if (rawName) {
-    const [rows] = await dbQuery('SELECT id FROM domains WHERE domain_name = $1', [String(rawName).trim().toLowerCase()])
-    return rows[0]?.id ?? null
+    const name = String(rawName).trim().toLowerCase()
+    const cached = domainIdCache.get(name)
+    if (cached && Date.now() < cached.expires) return cached.id
+    const [rows] = await dbQuery('SELECT id FROM domains WHERE domain_name = $1', [name])
+    const id = rows[0]?.id ?? null
+    domainIdCache.set(name, { id, expires: Date.now() + DOMAIN_ID_CACHE_TTL_MS })
+    return id
   }
   return null
+}
+
+// Short-lived cache for read-heavy dashboard aggregate endpoints. Dashboard
+// analytics don't need per-second freshness, and this avoids re-running
+// expensive aggregate queries every time an admin flips the domain/range filter.
+const DASHBOARD_CACHE_TTL_MS = envInt('DASHBOARD_CACHE_TTL_MS', 20 * 1000)
+const dashboardCache = new Map()
+
+function getCachedDashboard(key) {
+  const entry = dashboardCache.get(key)
+  if (!entry) return undefined
+  if (Date.now() > entry.expires) {
+    dashboardCache.delete(key)
+    return undefined
+  }
+  return entry.value
+}
+
+function setCachedDashboard(key, value) {
+  dashboardCache.set(key, { value, expires: Date.now() + DASHBOARD_CACHE_TTL_MS })
 }
 
 app.get('/api/admin/domains', requireAuth, async (_req, res) => {
@@ -274,102 +304,110 @@ const LOW_STOCK_THRESHOLD = 5
 app.get('/api/admin/dashboard/summary', requireAuth, async (req, res) => {
   try {
     const domainId = await resolveAdminDomainFilter(req)
+
+    const cacheKey = `summary:${domainId ?? 'all'}`
+    const cached = getCachedDashboard(cacheKey)
+    if (cached) return res.json(cached)
+
     const ordersDomainParams = domainId != null ? [domainId] : []
     const ordersDomainClause = domainId != null ? 'AND domain_id = $1' : ''
-
-    const [todayRows] = await dbQuery(
-      `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE created_at >= CURRENT_DATE ${ordersDomainClause}`,
-      ordersDomainParams
-    )
-    const [weekRows] = await dbQuery(
-      `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE created_at >= (CURRENT_DATE - INTERVAL '6 days') ${ordersDomainClause}`,
-      ordersDomainParams
-    )
-    const [monthRows] = await dbQuery(
-      `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE created_at >= date_trunc('month', CURRENT_DATE) ${ordersDomainClause}`,
-      ordersDomainParams
-    )
-    const [aovRows] = await dbQuery(
-      `SELECT COALESCE(AVG(total),0) AS avg_order_value FROM orders WHERE 1=1 ${ordersDomainClause}`,
-      ordersDomainParams
-    )
-    const [customerRows] = await dbQuery(
-      `SELECT
-         COUNT(*) AS total_customers,
-         COUNT(*) FILTER (WHERE first_order_at >= (NOW() - INTERVAL '30 days')) AS new_customers_30d
-       FROM (
-         SELECT LOWER(TRIM(customer_email)) AS email, MIN(created_at) AS first_order_at
-         FROM orders
-         WHERE customer_email IS NOT NULL AND TRIM(customer_email) <> '' ${ordersDomainClause}
-         GROUP BY LOWER(TRIM(customer_email))
-       ) c`,
-      ordersDomainParams
-    )
-    const [orderStatusRows] = await dbQuery(
-      `SELECT
-         COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS new_today,
-         COUNT(*) FILTER (WHERE LOWER(status) = 'pending') AS pending,
-         COUNT(*) FILTER (WHERE LOWER(status) = 'in_progress') AS processing,
-         COUNT(*) FILTER (WHERE LOWER(status) = 'delivered') AS delivered,
-         COUNT(*) FILTER (WHERE LOWER(status) = 'cancelled') AS cancelled,
-         COUNT(*) AS total
-       FROM orders WHERE 1=1 ${ordersDomainClause}`,
-      ordersDomainParams
-    )
 
     const successParams = [...DASHBOARD_RECEIVED_STATUSES]
     let successDomainClause = ''
     if (domainId != null) { successParams.push(domainId); successDomainClause = `AND o.domain_id = $${successParams.length}` }
     const successPlaceholders = DASHBOARD_RECEIVED_STATUSES.map((_, i) => '$' + (i + 1)).join(',')
-    const [successRows] = await dbQuery(
-      `SELECT COUNT(*) AS count, COALESCE(SUM(pay.amount),0) AS amount FROM payments pay INNER JOIN orders o ON o.id = pay.order_id
-       WHERE LOWER(pay.status) IN (${successPlaceholders}) ${successDomainClause}`,
-      successParams
-    )
 
     const failedParams = [...DASHBOARD_FAILED_STATUSES]
     let failedDomainClause = ''
     if (domainId != null) { failedParams.push(domainId); failedDomainClause = `AND o.domain_id = $${failedParams.length}` }
     const failedPlaceholders = DASHBOARD_FAILED_STATUSES.map((_, i) => '$' + (i + 1)).join(',')
-    const [failedRows] = await dbQuery(
-      `SELECT COUNT(*) AS count FROM payments pay INNER JOIN orders o ON o.id = pay.order_id
-       WHERE LOWER(pay.status) IN (${failedPlaceholders}) ${failedDomainClause}`,
-      failedParams
-    )
 
     const refundParams = []
     let refundDomainClause = ''
     if (domainId != null) { refundParams.push(domainId); refundDomainClause = `AND o.domain_id = $${refundParams.length}` }
-    const [refundRows] = await dbQuery(
-      `SELECT COALESCE(SUM(pay.amount),0) AS amount, COUNT(*) AS count
-       FROM payments pay INNER JOIN orders o ON o.id = pay.order_id
-       WHERE LOWER(pay.status) = 'refunded' ${refundDomainClause}`,
-      refundParams
-    )
-
-    const [outstandingRows] = await dbQuery(
-      `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders
-       WHERE LOWER(payment_status) IN ('pending','unpaid') ${ordersDomainClause}`,
-      ordersDomainParams
-    )
 
     const linksParams = []
     let linksDomainClause = ''
     if (domainId != null) { linksParams.push(domainId); linksDomainClause = `AND domain_id = $${linksParams.length}` }
-    const [pendingLinksRows] = await dbQuery(
-      `SELECT COUNT(*) AS count FROM payment_capture_requests
-       WHERE used_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) ${linksDomainClause}`,
-      linksParams
-    )
 
-    const [inventoryRows] = await dbQuery(
-      `SELECT
-         COUNT(*) AS total_products,
-         COUNT(*) FILTER (WHERE is_enabled::text IN ('1','true','t')) AS active_products,
-         COUNT(*) FILTER (WHERE stock_qty IS NOT NULL AND stock_qty > 0 AND stock_qty <= ${LOW_STOCK_THRESHOLD}) AS low_stock_products,
-         COUNT(*) FILTER (WHERE in_stock::text IN ('0','false','f') OR stock_qty = 0) AS out_of_stock_products
-       FROM products`
-    )
+    const [
+      [todayRows], [weekRows], [monthRows], [aovRows], [customerRows], [orderStatusRows],
+      [successRows], [failedRows], [refundRows], [outstandingRows], [pendingLinksRows], [inventoryRows],
+    ] = await Promise.all([
+      dbQuery(
+        `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE created_at >= CURRENT_DATE ${ordersDomainClause}`,
+        ordersDomainParams
+      ),
+      dbQuery(
+        `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE created_at >= (CURRENT_DATE - INTERVAL '6 days') ${ordersDomainClause}`,
+        ordersDomainParams
+      ),
+      dbQuery(
+        `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE created_at >= date_trunc('month', CURRENT_DATE) ${ordersDomainClause}`,
+        ordersDomainParams
+      ),
+      dbQuery(
+        `SELECT COALESCE(AVG(total),0) AS avg_order_value FROM orders WHERE 1=1 ${ordersDomainClause}`,
+        ordersDomainParams
+      ),
+      dbQuery(
+        `SELECT
+           COUNT(*) AS total_customers,
+           COUNT(*) FILTER (WHERE first_order_at >= (NOW() - INTERVAL '30 days')) AS new_customers_30d
+         FROM (
+           SELECT LOWER(TRIM(customer_email)) AS email, MIN(created_at) AS first_order_at
+           FROM orders
+           WHERE customer_email IS NOT NULL AND TRIM(customer_email) <> '' ${ordersDomainClause}
+           GROUP BY LOWER(TRIM(customer_email))
+         ) c`,
+        ordersDomainParams
+      ),
+      dbQuery(
+        `SELECT
+           COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS new_today,
+           COUNT(*) FILTER (WHERE LOWER(status) = 'pending') AS pending,
+           COUNT(*) FILTER (WHERE LOWER(status) = 'in_progress') AS processing,
+           COUNT(*) FILTER (WHERE LOWER(status) = 'delivered') AS delivered,
+           COUNT(*) FILTER (WHERE LOWER(status) = 'cancelled') AS cancelled,
+           COUNT(*) AS total
+         FROM orders WHERE 1=1 ${ordersDomainClause}`,
+        ordersDomainParams
+      ),
+      dbQuery(
+        `SELECT COUNT(*) AS count, COALESCE(SUM(pay.amount),0) AS amount FROM payments pay INNER JOIN orders o ON o.id = pay.order_id
+         WHERE LOWER(pay.status) IN (${successPlaceholders}) ${successDomainClause}`,
+        successParams
+      ),
+      dbQuery(
+        `SELECT COUNT(*) AS count FROM payments pay INNER JOIN orders o ON o.id = pay.order_id
+         WHERE LOWER(pay.status) IN (${failedPlaceholders}) ${failedDomainClause}`,
+        failedParams
+      ),
+      dbQuery(
+        `SELECT COALESCE(SUM(pay.amount),0) AS amount, COUNT(*) AS count
+         FROM payments pay INNER JOIN orders o ON o.id = pay.order_id
+         WHERE LOWER(pay.status) = 'refunded' ${refundDomainClause}`,
+        refundParams
+      ),
+      dbQuery(
+        `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders
+         WHERE LOWER(payment_status) IN ('pending','unpaid') ${ordersDomainClause}`,
+        ordersDomainParams
+      ),
+      dbQuery(
+        `SELECT COUNT(*) AS count FROM payment_capture_requests
+         WHERE used_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) ${linksDomainClause}`,
+        linksParams
+      ),
+      dbQuery(
+        `SELECT
+           COUNT(*) AS total_products,
+           COUNT(*) FILTER (WHERE is_enabled::text IN ('1','true','t')) AS active_products,
+           COUNT(*) FILTER (WHERE stock_qty IS NOT NULL AND stock_qty > 0 AND stock_qty <= ${LOW_STOCK_THRESHOLD}) AS low_stock_products,
+           COUNT(*) FILTER (WHERE in_stock::text IN ('0','false','f') OR stock_qty = 0) AS out_of_stock_products
+         FROM products`
+      ),
+    ])
 
     const row0 = (rows) => (Array.isArray(rows) && rows[0]) ? rows[0] : {}
     const today = row0(todayRows)
@@ -380,7 +418,7 @@ app.get('/api/admin/dashboard/summary', requireAuth, async (req, res) => {
     const ord = row0(orderStatusRows)
     const inv = row0(inventoryRows)
 
-    return res.json({
+    const payload = {
       sales: {
         todaySales: Number(today.amount || 0),
         todayOrders: Number(today.count || 0),
@@ -417,7 +455,9 @@ app.get('/api/admin/dashboard/summary', requireAuth, async (req, res) => {
         outOfStockProducts: Number(inv.out_of_stock_products || 0),
         lowStockThreshold: LOW_STOCK_THRESHOLD,
       },
-    })
+    }
+    setCachedDashboard(cacheKey, payload)
+    return res.json(payload)
   } catch (e) {
     console.error('[admin-service] /api/admin/dashboard/summary failed:', e?.message || e)
     return res.status(500).json({ error: e?.message || 'Failed to fetch dashboard summary' })
@@ -430,28 +470,35 @@ app.get('/api/admin/dashboard/trend', requireAuth, async (req, res) => {
     const days = Number.isFinite(daysRaw) ? Math.min(Math.max(Math.trunc(daysRaw), 1), 90) : 30
     const domainId = await resolveAdminDomainFilter(req)
 
+    const cacheKey = `trend:${domainId ?? 'all'}:${days}`
+    const cached = getCachedDashboard(cacheKey)
+    if (cached) return res.json(cached)
+
     const params = [days]
     let domainClause = ''
     if (domainId != null) { params.push(domainId); domainClause = `AND domain_id = $${params.length}` }
-    const [rows] = await dbQuery(
-      `SELECT DATE(created_at) AS day, COALESCE(SUM(total),0) AS revenue, COUNT(*) AS orders
-       FROM orders
-       WHERE created_at >= (CURRENT_DATE - ($1 * INTERVAL '1 day')) ${domainClause}
-       GROUP BY DATE(created_at)
-       ORDER BY day ASC`,
-      params
-    )
 
     const prevParams = [days]
     let prevDomainClause = ''
     if (domainId != null) { prevParams.push(domainId); prevDomainClause = `AND domain_id = $${prevParams.length}` }
-    const [prevRows] = await dbQuery(
-      `SELECT COALESCE(SUM(total),0) AS revenue, COUNT(*) AS orders
-       FROM orders
-       WHERE created_at >= (CURRENT_DATE - ($1 * 2 * INTERVAL '1 day'))
-         AND created_at < (CURRENT_DATE - ($1 * INTERVAL '1 day')) ${prevDomainClause}`,
-      prevParams
-    )
+
+    const [[rows], [prevRows]] = await Promise.all([
+      dbQuery(
+        `SELECT DATE(created_at) AS day, COALESCE(SUM(total),0) AS revenue, COUNT(*) AS orders
+         FROM orders
+         WHERE created_at >= (CURRENT_DATE - ($1 * INTERVAL '1 day')) ${domainClause}
+         GROUP BY DATE(created_at)
+         ORDER BY day ASC`,
+        params
+      ),
+      dbQuery(
+        `SELECT COALESCE(SUM(total),0) AS revenue, COUNT(*) AS orders
+         FROM orders
+         WHERE created_at >= (CURRENT_DATE - ($1 * 2 * INTERVAL '1 day'))
+           AND created_at < (CURRENT_DATE - ($1 * INTERVAL '1 day')) ${prevDomainClause}`,
+        prevParams
+      ),
+    ])
 
     const series = (Array.isArray(rows) ? rows : []).map((r) => ({
       date: r.day instanceof Date ? r.day.toISOString().slice(0, 10) : String(r.day),
@@ -463,13 +510,15 @@ app.get('/api/admin/dashboard/trend', requireAuth, async (req, res) => {
     const previous = { revenue: Number(prev.revenue || 0), orders: Number(prev.orders || 0) }
     const pctChange = (curr, prior) => (prior > 0 ? ((curr - prior) / prior) * 100 : null)
 
-    return res.json({
+    const payload = {
       series,
       current,
       previous,
       revenueChangePct: pctChange(current.revenue, previous.revenue),
       ordersChangePct: pctChange(current.orders, previous.orders),
-    })
+    }
+    setCachedDashboard(cacheKey, payload)
+    return res.json(payload)
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Failed to fetch trend' })
   }
@@ -480,6 +529,10 @@ app.get('/api/admin/dashboard/customer-growth', requireAuth, async (req, res) =>
     const daysRaw = Number(req.query?.days || 90)
     const days = Number.isFinite(daysRaw) ? Math.min(Math.max(Math.trunc(daysRaw), 7), 365) : 90
     const domainId = await resolveAdminDomainFilter(req)
+
+    const cacheKey = `customer-growth:${domainId ?? 'all'}:${days}`
+    const cached = getCachedDashboard(cacheKey)
+    if (cached) return res.json(cached)
 
     const params = [days]
     let domainClause = ''
@@ -504,7 +557,9 @@ app.get('/api/admin/dashboard/customer-growth', requireAuth, async (req, res) =>
       newCustomers: Number(r.new_customers || 0),
     }))
 
-    return res.json({ series })
+    const payload = { series }
+    setCachedDashboard(cacheKey, payload)
+    return res.json(payload)
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Failed to fetch customer growth' })
   }
@@ -516,6 +571,10 @@ app.get('/api/admin/dashboard/top-products', requireAuth, async (req, res) => {
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 20) : 6
     const sortDir = String(req.query?.sort || 'top').toLowerCase() === 'low' ? 'ASC' : 'DESC'
     const domainId = await resolveAdminDomainFilter(req)
+
+    const cacheKey = `top-products:${domainId ?? 'all'}:${limit}:${sortDir}`
+    const cached = getCachedDashboard(cacheKey)
+    if (cached) return res.json(cached)
 
     const params = []
     let qtyExpr = 'COALESCE(SUM(oi.quantity),0)'
@@ -543,7 +602,9 @@ app.get('/api/admin/dashboard/top-products', requireAuth, async (req, res) => {
        LIMIT ${limit}`,
       params
     )
-    return res.json({ products: Array.isArray(rows) ? rows : [] })
+    const payload = { products: Array.isArray(rows) ? rows : [] }
+    setCachedDashboard(cacheKey, payload)
+    return res.json(payload)
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Failed to fetch top products' })
   }
@@ -551,29 +612,37 @@ app.get('/api/admin/dashboard/top-products', requireAuth, async (req, res) => {
 
 app.get('/api/admin/dashboard/inventory', requireAuth, async (_req, res) => {
   try {
-    const [lowStockRows] = await dbQuery(
-      `SELECT id, name, sku, image_url, stock_qty, is_enabled
-       FROM products
-       WHERE stock_qty IS NOT NULL AND stock_qty > 0 AND stock_qty <= ${LOW_STOCK_THRESHOLD}
-       ORDER BY stock_qty ASC LIMIT 20`
-    )
-    const [outOfStockRows] = await dbQuery(
-      `SELECT id, name, sku, image_url, stock_qty, is_enabled
-       FROM products
-       WHERE in_stock::text IN ('0','false','f') OR stock_qty = 0
-       ORDER BY updated_at DESC LIMIT 20`
-    )
-    const [recentRows] = await dbQuery(
-      `SELECT id, name, sku, image_url, stock_qty, is_enabled, created_at
-       FROM products
-       ORDER BY created_at DESC LIMIT 8`
-    )
-    return res.json({
+    const cacheKey = 'inventory'
+    const cached = getCachedDashboard(cacheKey)
+    if (cached) return res.json(cached)
+
+    const [[lowStockRows], [outOfStockRows], [recentRows]] = await Promise.all([
+      dbQuery(
+        `SELECT id, name, sku, image_url, stock_qty, is_enabled
+         FROM products
+         WHERE stock_qty IS NOT NULL AND stock_qty > 0 AND stock_qty <= ${LOW_STOCK_THRESHOLD}
+         ORDER BY stock_qty ASC LIMIT 20`
+      ),
+      dbQuery(
+        `SELECT id, name, sku, image_url, stock_qty, is_enabled
+         FROM products
+         WHERE in_stock::text IN ('0','false','f') OR stock_qty = 0
+         ORDER BY updated_at DESC LIMIT 20`
+      ),
+      dbQuery(
+        `SELECT id, name, sku, image_url, stock_qty, is_enabled, created_at
+         FROM products
+         ORDER BY created_at DESC LIMIT 8`
+      ),
+    ])
+    const payload = {
       lowStockThreshold: LOW_STOCK_THRESHOLD,
       lowStock: Array.isArray(lowStockRows) ? lowStockRows : [],
       outOfStock: Array.isArray(outOfStockRows) ? outOfStockRows : [],
       recentlyAdded: Array.isArray(recentRows) ? recentRows : [],
-    })
+    }
+    setCachedDashboard(cacheKey, payload)
+    return res.json(payload)
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Failed to fetch inventory' })
   }
@@ -582,6 +651,11 @@ app.get('/api/admin/dashboard/inventory', requireAuth, async (_req, res) => {
 app.get('/api/admin/dashboard/payment-methods', requireAuth, async (req, res) => {
   try {
     const domainId = await resolveAdminDomainFilter(req)
+
+    const cacheKey = `payment-methods:${domainId ?? 'all'}`
+    const cached = getCachedDashboard(cacheKey)
+    if (cached) return res.json(cached)
+
     const params = []
     let domainClause = ''
     if (domainId != null) { params.push(domainId); domainClause = `AND o.domain_id = $${params.length}` }
@@ -594,7 +668,9 @@ app.get('/api/admin/dashboard/payment-methods', requireAuth, async (req, res) =>
        ORDER BY amount DESC`,
       params
     )
-    return res.json({ methods: Array.isArray(rows) ? rows : [] })
+    const payload = { methods: Array.isArray(rows) ? rows : [] }
+    setCachedDashboard(cacheKey, payload)
+    return res.json(payload)
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Failed to fetch payment methods' })
   }
@@ -606,32 +682,38 @@ app.get('/api/admin/dashboard/activity', requireAuth, async (req, res) => {
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 50) : 15
     const domainId = await resolveAdminDomainFilter(req)
 
+    const cacheKey = `activity:${domainId ?? 'all'}:${limit}`
+    const cached = getCachedDashboard(cacheKey)
+    if (cached) return res.json(cached)
+
     const orderParams = []
     let orderDomainClause = ''
     if (domainId != null) { orderParams.push(domainId); orderDomainClause = `AND domain_id = $${orderParams.length}` }
-    const [orderRows] = await dbQuery(
-      `SELECT id, order_number, customer_name, customer_email, total, currency, created_at
-       FROM orders WHERE 1=1 ${orderDomainClause}
-       ORDER BY created_at DESC LIMIT ${limit}`,
-      orderParams
-    )
 
     const paymentParams = [...DASHBOARD_RECEIVED_STATUSES]
     let paymentDomainClause = ''
     if (domainId != null) { paymentParams.push(domainId); paymentDomainClause = `AND o.domain_id = $${paymentParams.length}` }
     const paymentPlaceholders = DASHBOARD_RECEIVED_STATUSES.map((_, i) => '$' + (i + 1)).join(',')
-    const [paymentRows] = await dbQuery(
-      `SELECT pay.id, pay.order_id, o.order_number, pay.amount, pay.currency, pay.status, pay.created_at
-       FROM payments pay
-       INNER JOIN orders o ON o.id = pay.order_id
-       WHERE LOWER(pay.status) IN (${paymentPlaceholders}) ${paymentDomainClause}
-       ORDER BY pay.created_at DESC LIMIT ${limit}`,
-      paymentParams
-    )
 
-    const [productRows] = await dbQuery(
-      `SELECT id, name, sku, created_at FROM products ORDER BY created_at DESC LIMIT ${limit}`
-    )
+    const [[orderRows], [paymentRows], [productRows]] = await Promise.all([
+      dbQuery(
+        `SELECT id, order_number, customer_name, customer_email, total, currency, created_at
+         FROM orders WHERE 1=1 ${orderDomainClause}
+         ORDER BY created_at DESC LIMIT ${limit}`,
+        orderParams
+      ),
+      dbQuery(
+        `SELECT pay.id, pay.order_id, o.order_number, pay.amount, pay.currency, pay.status, pay.created_at
+         FROM payments pay
+         INNER JOIN orders o ON o.id = pay.order_id
+         WHERE LOWER(pay.status) IN (${paymentPlaceholders}) ${paymentDomainClause}
+         ORDER BY pay.created_at DESC LIMIT ${limit}`,
+        paymentParams
+      ),
+      dbQuery(
+        `SELECT id, name, sku, created_at FROM products ORDER BY created_at DESC LIMIT ${limit}`
+      ),
+    ])
 
     const activity = [
       ...(Array.isArray(orderRows) ? orderRows : []).map((r) => ({
@@ -662,7 +744,9 @@ app.get('/api/admin/dashboard/activity', requireAuth, async (req, res) => {
     ]
     activity.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
 
-    return res.json({ activity: activity.slice(0, limit) })
+    const payload = { activity: activity.slice(0, limit) }
+    setCachedDashboard(cacheKey, payload)
+    return res.json(payload)
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Failed to fetch activity' })
   }
