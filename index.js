@@ -276,16 +276,18 @@ async function resolveDomainNameById(domainId) {
   }
 }
 
-// Per-domain "from" address/name, reusing the same brand registry the
-// storefronts' order-confirmation emails use (shared-email/brand-config.js),
-// so a customer always sees the brand they actually ordered from. Loaded
+// Per-domain "from" address/name, using admin-service's own copy of the
+// brand registry (./brand-config.js) so a customer always sees the brand
+// they actually ordered from. This must stay a local copy, not an import
+// from ../../shared-email — that package is deployed on a separate VPS
+// instance and isn't reachable from here in production. Loaded
 // lazily/defensively — a domain with no brand entry (or the module being
 // unreachable) just falls back to admin-service's existing default sender.
 let brandConfigModulePromise = null
 async function resolveBrandFromForDomain(domainName) {
   if (!domainName) return null
   try {
-    if (!brandConfigModulePromise) brandConfigModulePromise = import('../../shared-email/brand-config.js')
+    if (!brandConfigModulePromise) brandConfigModulePromise = import('./brand-config.js')
     const mod = await brandConfigModulePromise
     const brand = mod.getBrandConfig(domainName)
     return { from: brand.from, fromName: brand.fromName, website: brand.website }
@@ -8050,7 +8052,7 @@ app.post('/api/admin/orders/:orderNumber/capture-payment', requireAuth, async (r
     )
 
     if (!emailRes?.success) {
-      return res.status(502).json({ error: emailRes?.error || 'Failed to send email' })
+      return res.status(500).json({ error: emailRes?.error || 'Failed to send email' })
     }
 
     return res.json({ success: true })
