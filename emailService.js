@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import {getBrandConfig} from './brand-config.js';
 
 const env = (name, fallback = '') => {
   const v = process.env[name];
@@ -9,13 +10,51 @@ const env = (name, fallback = '') => {
   return String(v);
 };
 
-const sendEmailViaResend = async ({ to, subject, html, text, headers = {} }) => {
+// Derives the store/tenant domain an order belongs to, so email content never
+// hardcodes a single brand name across a multi-domain deployment.
+const getStoreDomain = (data) => {
+  const candidates = [data?.storeDomain, data?.domain, data?.brandDomain, data?.website, data?.from];
+  for (const c of candidates) {
+    const raw = String(c || '').trim();
+    if (!raw) continue;
+    try {
+      const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw.includes('@') ? raw.split('@')[1] : raw}`;
+      const host = new URL(withProtocol).hostname.replace(/^www\./i, '');
+      if (host) return host;
+    } catch {
+      const cleaned = raw.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0].split('@').pop();
+      if (cleaned) return cleaned;
+    }
+  }
+  const fallbackEmail = env('EMAIL_FROM_EMAIL', env('MAILJET_SENDER_EMAIL', 'info@alluvi.org'));
+  return String(fallbackEmail).split('@')[1] || 'alluvi.org';
+};
+
+// Friendly brand name to *display* (e.g. "Zyra Healthcare"), as opposed to
+// getStoreDomain()'s raw host (e.g. "zyrahealthcare.com") which is still
+// needed for links/mailto addresses. Falls back to the raw domain when no
+// brand entry / explicit name is available.
+const getStoreName = (domain, data) => {
+  const explicit = String(data?.brandName || data?.storeName || '').trim();
+  if (explicit) return explicit;
+  try {
+    const brand = getBrandConfig(domain);
+    const name = String(brand?.name || brand?.fromName || '').trim();
+    if (name) return name;
+  } catch {
+    // no brand entry for this domain — fall back to the raw domain below
+  }
+  return domain;
+};
+
+const sendEmailViaResend = async ({ to, subject, html, text, headers = {}, from, fromName: fromNameOverride }) => {
   const apiKey = env('RESEND_API_KEY');
   if (!apiKey) return { success: false, error: 'RESEND_API_KEY missing' };
 
-  const fromEmail = env('EMAIL_FROM_EMAIL', env('MAILJET_SENDER_EMAIL', 'info@alluvi.org'));
-  const fromNameRaw = env('EMAIL_FROM_NAME', env('MAILJET_SENDER_NAME', 'Team Alluvi'));
-  const fromName = /klyme/i.test(fromNameRaw) ? 'Alluvi' : fromNameRaw;
+  const fromEmail = from || env('EMAIL_FROM_EMAIL', env('MAILJET_SENDER_EMAIL', 'info@alluvi.org'));
+  const fromDomain = fromEmail.split('@')[1] || 'alluvi.org';
+  const fromNameRaw = fromNameOverride || env('EMAIL_FROM_NAME', env('MAILJET_SENDER_NAME', fromDomain));
+  const fromName = /klyme/i.test(fromNameRaw) ? fromDomain : fromNameRaw;
 
   const payload = {
     from: `${fromName} <${fromEmail}>`,
@@ -49,8 +88,9 @@ const sendEmailViaMailjet = async ({ to, subject, html, text, inlineAttachments 
   const apiKey = env('MAILJET_API_KEY');
   const secretKey = env('MAILJET_SECRET_KEY');
   const fromEmail = env('MAILJET_SENDER_EMAIL');
-  const fromNameRaw = env('MAILJET_SENDER_NAME', 'Alluvi');
-  const fromName = /klyme/i.test(fromNameRaw) ? 'Alluvi' : fromNameRaw;
+  const fromDomain = (fromEmail || '').split('@')[1] || 'alluvi.org';
+  const fromNameRaw = env('MAILJET_SENDER_NAME', fromDomain);
+  const fromName = /klyme/i.test(fromNameRaw) ? fromDomain : fromNameRaw;
 
   if (!apiKey || !secretKey || !fromEmail) {
     return { success: false, error: 'MAILJET credentials missing' };
@@ -349,10 +389,14 @@ const getEmailTemplate = (type, data) => {
   const baseStyle = '';
   let content = '';
 
+  const storeDomain = getStoreDomain(data);
+  const storeUrl = `https://${storeDomain}`;
+  const storeName = getStoreName(storeDomain, data);
+
   const hasLogo = hasAlluviLogoFile();
   const headerLogoHtml = hasLogo
-    ? `<img src="cid:${ALLUVI_LOGO_CID}" alt="Alluvi" style="display:inline-block;height:52px;width:auto;" />`
-    : `<h1 style="font-size: 36px; font-weight: 800; color: #ffffff; margin: 0; letter-spacing: -1px;">ALLUVI</h1>`;
+    ? `<img src="cid:${ALLUVI_LOGO_CID}" alt="${storeName}" style="display:inline-block;height:52px;width:auto;" />`
+    : `<h1 style="font-size: 36px; font-weight: 500; color: #ffffff; margin: 0; letter-spacing: -1px;">${storeName.toUpperCase()}</h1>`;
 
   const safeText = (v, fallback = '') => {
     if (v === undefined || v === null) return fallback;
@@ -366,11 +410,11 @@ const getEmailTemplate = (type, data) => {
     case 'order_confirmation':
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
-            <h1 style="font-size: 36px; font-weight: 800; color: #ffffff; margin: 0; letter-spacing: -1px;">ALLUVI</h1>
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
+            <h1 style="font-size: 36px; font-weight: 500; color: #ffffff; margin: 0; letter-spacing: -1px;">${storeName.toUpperCase()}</h1>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 700; color: #1a1a1a; margin: 0 0 25px 0; line-height: 1.3;">Thank you for your order request with Alluvi!</h2>
+            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 25px 0; line-height: 1.3;">Thank you for your order request with ${storeName}!</h2>
             
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 15px 0;">Hi ${safeText(data.customerName, 'Customer')},</p>
             
@@ -388,7 +432,7 @@ const getEmailTemplate = (type, data) => {
 
             <h3 style="margin-top: 30px; color: #1a1a1a; font-size: 20px; margin-bottom: 20px;">Order details</h3>
             
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 25px; margin: 25px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 25px; margin: 25px 0; border-radius: 8px;">
               <div style="margin-bottom: 15px;">
                 <div style="font-size: 14px; color: #666; margin-bottom: 5px;">Order number</div>
                 <div style="font-size: 18px; font-weight: 700; color: #1a1a1a;">${data.orderNumber}</div>
@@ -408,7 +452,7 @@ const getEmailTemplate = (type, data) => {
               
               <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e9ecef;">
                 <div style="font-size: 14px; color: #666; margin-bottom: 5px;">Total paid</div>
-                <div style="font-size: 22px; font-weight: 700; color: #FF8200;">£${data.total.toFixed(2)}</div>
+                <div style="font-size: 22px; font-weight: 700; color: #2563EB;">$${data.total.toFixed(2)}</div>
               </div>
             </div>
 
@@ -416,7 +460,7 @@ const getEmailTemplate = (type, data) => {
 
             <h3 style="margin-top: 30px; color: #1a1a1a; font-size: 20px; margin-bottom: 20px;">Shipping method</h3>
             
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 25px; margin: 25px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 25px; margin: 25px 0; border-radius: 8px;">
               <div style="margin-bottom: 10px;">
                 <div style="font-size: 14px; color: #666; margin-bottom: 5px;">Service</div>
                 <div style="font-size: 16px; font-weight: 600; color: #1a1a1a;">Royal Mail</div>
@@ -427,7 +471,7 @@ const getEmailTemplate = (type, data) => {
 
             <h3 style="margin-top: 30px; color: #1a1a1a; font-size: 20px; margin-bottom: 20px;">Shipping address</h3>
             
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 25px; margin: 25px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 25px; margin: 25px 0; border-radius: 8px;">
               <p style="margin: 0; line-height: 1.8; color: #1a1a1a; font-size: 16px;">
                 <strong>${safeText(data.customerName, 'Customer')}</strong><br>
                 ${safeText(data.shippingAddress, '-') }<br>
@@ -441,8 +485,8 @@ const getEmailTemplate = (type, data) => {
             
           </div>
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> 2024 Alluvi. All rights reserved.</p>
-            <p style="font-size: 14px; color: #999; margin: 8px 0;">For any questions, please contact us via Live Chat on <a href="https://alluvi.org" style="color: #FF8200; text-decoration: none;">Alluvi usa</a>.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${storeName}. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;">For any questions, please contact us via Live Chat on <a href="${storeUrl}" style="color: #2563EB; text-decoration: none;">${storeName}</a>.</p>
           </div>
         </div>
       `;
@@ -452,8 +496,7 @@ const getEmailTemplate = (type, data) => {
       const name = String(data?.customerName || '').trim() || 'there';
       const orderNumber = String(data?.orderNumber || '').trim();
       const amount = Number(data?.amount || data?.total || 0);
-      const currency = String(data?.currency || 'GBP').trim() || 'GBP';
-      const publicBase = String(process.env.PUBLIC_BASE_URL || process.env.PUBLIC_API_BASE_URL || 'https://www.alluvi.org').replace(/\/$/, '');
+      const publicBase = String(process.env.PUBLIC_BASE_URL || process.env.PUBLIC_API_BASE_URL || storeUrl).replace(/\/$/, '');
       const trackUrl = String(data?.trackUrl || `${publicBase}/track-order`).trim();
       
       // Get order date from data or use current date
@@ -482,16 +525,16 @@ const getEmailTemplate = (type, data) => {
 
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
+          <div style="background:#1c1c1c; padding: 30px 40px; text-align: center;">
             ${headerLogoHtml}
             <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Payment Successful</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 800; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Your payment is confirmed</h2>
+            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Your payment is confirmed</h2>
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Hi ${name},</p>
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">${deliveryText}</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 22px; margin: 18px 0 22px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 18px 0 22px 0; border-radius: 8px;">
               <div style="font-size: 14px; line-height: 1.7; color: #4a4a4a; margin: 0;">
                 Orders are typically processed within 2 working days. Once your order is dispatched, you will receive a separate email with your tracking details. Please keep an eye on your inbox (and spam/junk folder) for updates.
               </div>
@@ -506,21 +549,21 @@ const getEmailTemplate = (type, data) => {
               ` : ''}
               <div style="margin-bottom: 12px;">
                 <div style="font-size: 12px; font-weight: 700; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Amount</div>
-                <div style="font-size: 20px; font-weight: 900; color: #00b894;">£${Number.isFinite(amount) ? amount.toFixed(2) : '0.00'} ${currency}</div>
+                <div style="font-size: 20px; font-weight: 900; color: #00b894;">$${Number.isFinite(amount) ? amount.toFixed(2) : '0.00'}</div>
               </div>
             </div>
 
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 14px 0;">You can track your order status at any time from the Track Order page.</p>
 
             <div style="text-align: center; margin: 22px 0 0; display: flex; flex-direction: column; gap: 12px; align-items: center;">
-              <a href="${trackUrl}" style="display: inline-block; background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Open Track Order</a>
-              <a href="https://alluvi.org/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact Alluvi Support</a>
+              <a href="${trackUrl}" style="display: inline-block; background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Open Track Order</a>
+              <a href="${storeUrl}/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact ${storeName} Support</a>
             </div>
 
-            <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">If you need help, you can message us on Live Chat from the official website <strong>Alluvi usa</strong>.</p>
+            <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">If you need help, you can message us on Live Chat from the official website <strong>${storeName}</strong>.</p>
           </div>
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
           </div>
         </div>
       `;
@@ -531,23 +574,22 @@ const getEmailTemplate = (type, data) => {
       const name = String(data?.customerName || '').trim() || 'there';
       const orderNumber = String(data?.orderNumber || '').trim();
       const total = Number(data?.total || 0);
-      const currency = String(data?.currency || 'GBP').trim() || 'GBP';
-      const trackUrl = String(data?.trackUrl || 'https://www.alluvi.org/track-order').trim();
-      const website = String(data?.website || 'https://www.alluvi.org').trim();
+      const trackUrl = String(data?.trackUrl || `${storeUrl}/track-order`).trim();
+      const website = String(data?.website || storeUrl).trim();
 
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
-            <h1 style="font-size: 36px; font-weight: 800; color: #ffffff; margin: 0; letter-spacing: -1px;">ALLUVI</h1>
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
+            <h1 style="font-size: 36px; font-weight: 500; color: #ffffff; margin: 0; letter-spacing: -1px;">${storeName.toUpperCase()}</h1>
             <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Secure Card Payment</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 800; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Complete your payment</h2>
+            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Complete your payment</h2>
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Hi ${name},</p>
 
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Your order was created using our secure payment processor.</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 22px; margin: 22px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 22px 0; border-radius: 8px;">
               ${orderNumber ? `
                 <div style="margin-bottom: 12px;">
                   <div style="font-size: 12px; font-weight: 700; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
@@ -556,20 +598,20 @@ const getEmailTemplate = (type, data) => {
               ` : ''}
               <div>
                 <div style="font-size: 12px; font-weight: 700; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Amount</div>
-                <div style="font-size: 20px; font-weight: 900; color: #FF8200;">£${Number.isFinite(total) ? total.toFixed(2) : '0.00'} ${currency}</div>
+                <div style="font-size: 20px; font-weight: 900; color: #2563EB;">$${Number.isFinite(total) ? total.toFixed(2) : '0.00'}</div>
               </div>
             </div>
 
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">If your payment was not completed, you can continue from the Track Order page.</p>
 
             <div style="text-align: center; margin: 26px 0;">
-              <a href="${trackUrl}" style="display: inline-block; background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Open Track Order</a>
+              <a href="${trackUrl}" style="display: inline-block; background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Open Track Order</a>
             </div>
 
-            <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">Need help? Use Live Chat on <a href="${website}" style="color:#FF8200; text-decoration:none; font-weight:800;">Alluvi usa</a> for assistance.</p>
+            <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">Need help? Use Live Chat on <a href="${website}" style="color:#2563EB; text-decoration:none; font-weight:800;">${storeName}</a> for assistance.</p>
           </div>
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
           </div>
         </div>
       `;
@@ -581,20 +623,20 @@ const getEmailTemplate = (type, data) => {
       const orderNumber = String(data?.orderNumber || '').trim();
       const deliveryText = String(data?.deliveryText || '').trim();
       const deliveryDateLabel = String(data?.deliveryDateLabel || '').trim();
-      const trackUrl = String(data?.trackUrl || 'https://www.alluvi.org/track-order').trim();
+      const trackUrl = String(data?.trackUrl || `${storeUrl}/track-order`).trim();
 
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
             ${headerLogoHtml}
             <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Delivery Information</p>
           </div>
 
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 800; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Delivery timing & tracking</h2>
+            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Delivery timing & tracking</h2>
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Hi ${name},</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 22px; margin: 22px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 22px 0; border-radius: 8px;">
               ${orderNumber ? `
                 <div style="margin-bottom: 12px;">
                   <div style="font-size: 12px; font-weight: 700; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
@@ -616,19 +658,19 @@ const getEmailTemplate = (type, data) => {
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">You can also track your order in the Track Order page.</p>
 
             <div style="text-align: center; margin: 22px 0;">
-              <a href="${trackUrl}" style="display: inline-block; background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Track your order</a>
+              <a href="${trackUrl}" style="display: inline-block; background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Track your order</a>
             </div>
 
-            <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">If you need help, you can message us on Live Chat from the official website <strong>Alluvi usa</strong>.</p>
+            <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">If you need help, you can message us on Live Chat from the official website <strong>${storeName}</strong>.</p>
 
             <div style="text-align: center; margin: 16px 0 0;">
-              <a href="https://alluvi.org/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact Alluvi Support</a>
+              <a href="${storeUrl}/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact ${storeName} Support</a>
             </div>
           </div>
 
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
-            <p style="font-size: 14px; color: #999; margin: 8px 0;">For help, contact us via Live Chat on <a href="https://alluvi.org" style="color: #FF8200; text-decoration: none;">Alluvi usa</a>.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;">For help, contact us via Live Chat on <a href="${storeUrl}" style="color: #2563EB; text-decoration: none;">${storeName}</a>.</p>
           </div>
         </div>
       `;
@@ -639,18 +681,18 @@ const getEmailTemplate = (type, data) => {
       const name = String(data?.customerName || '').trim() || 'there';
       const orderNumber = String(data?.orderNumber || '').trim();
       const reason = String(data?.reason || '').trim();
-      const trackUrl = String(data?.trackUrl || 'https://www.alluvi.org/track-order').trim();
+      const trackUrl = String(data?.trackUrl || `${storeUrl}/track-order`).trim();
 
       content = `
         <div style="background: #f3f3f3; padding: 24px 14px;">
           <div style="max-width: 650px; margin: 0 auto; background: #ffffff; border-radius: 12px; box-shadow: 0 6px 22px rgba(0,0,0,0.10); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-            <div style="background: #FF8200; padding: 44px 40px; text-align: center;">
+            <div style="background: #2563EB; padding: 44px 40px; text-align: center;">
               ${headerLogoHtml}
               <p style="font-size: 12px; font-style: italic; color: rgba(255,255,255,0.92); margin: 10px 0 0 0;">Payment Rejected</p>
             </div>
 
             <div style="padding: 42px 40px 30px 40px;">
-              <h2 style="font-size: 28px; font-weight: 900; color: #111; margin: 0 0 16px 0; line-height: 1.2;">We couldn’t confirm your payment</h2>
+              <h2 style="font-size: 28px; font-weight: 200; color: #111; margin: 0 0 16px 0; line-height: 1.2;">We couldn’t confirm your payment</h2>
               <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0 0 12px 0;">Hi ${name},</p>
 
               <p style="font-size: 13px; line-height: 1.7; color: #666; margin: 0 0 16px 0;">Your payment was not successful with our payment processor.</p>
@@ -673,15 +715,15 @@ const getEmailTemplate = (type, data) => {
               <p style="font-size: 12px; line-height: 1.7; color: #666; margin: 0 0 18px 0;">You can track your order status and attempt checkout again from the Track Order page.</p>
 
               <div style="text-align: center; margin: 18px 0 22px;">
-                <a href="${trackUrl}" style="display: inline-block; background: #FF8200; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 900; font-size: 13px;">Open Track Order</a>
+                <a href="${trackUrl}" style="display: inline-block; background: #2563EB; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 900; font-size: 13px;">Open Track Order</a>
               </div>
 
               <p style="font-size: 12px; line-height: 1.7; color: #777; margin: 0;">If you did not place this order, you can safely ignore this email.</p>
             </div>
 
             <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 34px 24px; text-align: center;">
-              <p style="font-size: 11px; color: #aaa; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
-              <p style="font-size: 11px; color: #aaa; margin: 8px 0;">For help, contact us via Live Chat on <a href="https://alluvi.org" style="color: #FF8200; text-decoration: none; font-weight: 800;">Alluvi usa</a>.</p>
+              <p style="font-size: 11px; color: #aaa; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+              <p style="font-size: 11px; color: #aaa; margin: 8px 0;">For help, contact us via Live Chat on <a href="${storeUrl}" style="color: #2563EB; text-decoration: none; font-weight: 800;">${storeName}</a>.</p>
             </div>
           </div>
         </div>
@@ -753,7 +795,7 @@ const getEmailTemplate = (type, data) => {
         ? (ibDiscountFromTotals > 0 && Number.isFinite(ibTotalFromPayload) ? Number(ibTotalFromPayload || 0) : ibComputedAfterDiscountTotal)
         : (Number.isFinite(ibTotalFromPayload) ? Number(ibTotalFromPayload || 0) : ibPreSubtotalRounded);
 
-      const ibBankName = data?.bank?.bankName || 'Openpayd Financial Services - CP - GBP';
+      const ibBankName = data?.bank?.bankName || 'Openpayd Financial Services - CP - USD';
       const ibBankAddress = data?.bank?.bankAddress || 'Pangea, Level 5, Triq San Gorg, St. Julians STJ 3204, United Kingdom';
       const ibBankAccountNumber = data?.bank?.accountNumber || '02207055';
       const ibBankSortCode = data?.bank?.sortCode || '040511';
@@ -815,7 +857,7 @@ const getEmailTemplate = (type, data) => {
                   <th style="text-align: left; font-weight: 700; padding: 8px 6px; border-bottom: 1px solid #cfcfcf;">Description</th>
                   <th style="text-align: center; font-weight: 700; padding: 8px 6px; border-bottom: 1px solid #cfcfcf; width: 70px;">Qty</th>
                   <th style="text-align: center; font-weight: 700; padding: 8px 6px; border-bottom: 1px solid #cfcfcf; width: 70px;">Rate</th>
-                  <th style="text-align: right; font-weight: 700; padding: 8px 6px; border-bottom: 1px solid #cfcfcf; width: 130px;">Amount GBP</th>
+                  <th style="text-align: right; font-weight: 700; padding: 8px 6px; border-bottom: 1px solid #cfcfcf; width: 130px;">Amount USD</th>
                 </tr>
               </thead>
               <tbody>
@@ -851,7 +893,7 @@ const getEmailTemplate = (type, data) => {
                       </tr>
                     ` : ''}
                     <tr>
-                      <td style="padding: 12px 0 10px; border-top: 2px solid #111; text-align: right; font-weight: 800;">TOTAL GBP</td>
+                      <td style="padding: 12px 0 10px; border-top: 2px solid #111; text-align: right; font-weight: 800;">TOTAL USD</td>
                       <td style="padding: 12px 0 10px; border-top: 2px solid #111; text-align: right; font-weight: 800; width: 140px;">${ibFormatMoney(ibAfterDiscountTotal)}</td>
                     </tr>
                   </table>
@@ -876,18 +918,18 @@ const getEmailTemplate = (type, data) => {
       const cutoffText = String(data?.cutoffText || '').trim() || 'If you pay before 2PM today, you will get the delivery tomorrow.';
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
-            <h1 style="font-size: 36px; font-weight: 800; color: #ffffff; margin: 0; letter-spacing: -1px;">ALLUVI</h1>
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
+            <h1 style="font-size: 36px; font-weight: 500; color: #ffffff; margin: 0; letter-spacing: -1px;">${storeName.toUpperCase()}</h1>
             <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Payment Reminder</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 700; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Final step: complete your payment</h2>
+            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Final step: complete your payment</h2>
 
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">Hi ${String(data?.customerName || '').trim() || 'there'},</p>
 
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">This is a friendly reminder that your order is still awaiting payment confirmation. Once payment is completed, we can move your order straight into processing.</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 22px; margin: 22px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 22px 0; border-radius: 8px;">
               <div style="margin-bottom: 12px;">
                 <div style="font-size: 12px; font-weight: 600; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
                 <div style="font-size: 18px; font-weight: 800; color: #1a1a1a;">${String(data?.orderNumber || '').trim()}</div>
@@ -895,11 +937,11 @@ const getEmailTemplate = (type, data) => {
               ${typeof data?.total !== 'undefined' ? `
                 <div style="margin-bottom: 12px;">
                   <div style="font-size: 12px; font-weight: 600; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Amount</div>
-                  <div style="font-size: 20px; font-weight: 800; color: #FF8200;">£${Number(data?.total || 0).toFixed(2)} ${data?.currency || 'GBP'}</div>
+                  <div style="font-size: 20px; font-weight: 800; color: #2563EB;">$${Number(data?.total || 0).toFixed(2)}</div>
                 </div>
               ` : ''}
               <div style="margin: 0 0 12px 0; font-size: 13px; line-height: 1.7; color: #666;">
-                If you are unsure about this email integrity, please contact us via Live Chat on Alluvi usa
+                If you are unsure about this email integrity, please contact us via Live Chat on ${storeName}
               </div>
               <div style="margin: 0; font-size: 13px; line-height: 1.7; color: #666;">
                 Orders are typically processed within 2 working days. Once your order is dispatched, you will receive a separate email with your tracking details. Please keep an eye on your inbox (and spam/junk folder) for updates.
@@ -907,15 +949,15 @@ const getEmailTemplate = (type, data) => {
             </div>
 
             <div style="text-align: center; margin: 26px 0 0; display: flex; flex-direction: column; gap: 12px; align-items: center;">
-              <a href="${String(data?.paymentLink || '').trim()}" style="display: inline-block; background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 700; font-size: 16px;">Open Secure Payment Page</a>
-              <a href="https://alluvi.org/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact Support</a>
+              <a href="${String(data?.paymentLink || '').trim()}" style="display: inline-block; background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 700; font-size: 16px;">Open Secure Payment Page</a>
+              <a href="${storeUrl}/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact Support</a>
             </div>
 
-            <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0 0 12px 0;">For your security, please only use the official Alluvi payment page from <strong>www.alluvi.org</strong>.</p>
+            <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0 0 12px 0;">For your security, please only use the official ${storeName} payment page from <strong>${storeName}</strong>.</p>
             <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">If you’ve already paid, you can ignore this message — our system will update your order automatically once verified.</p>
           </div>
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
           </div>
         </div>
       `;
@@ -924,32 +966,32 @@ const getEmailTemplate = (type, data) => {
 
     case 'customer_info':
       const customerInfoName = String(data?.customerName || '').trim();
-      const trackUrl = data?.trackUrl || 'https://alluvi.org/track-order';
-      const supportTeam = data?.supportTeam || 'Alluvi Support Team';
+      const trackUrl = data?.trackUrl || `${storeUrl}/track-order`;
+      const supportTeam = data?.supportTeam || `${storeName} Support Team`;
 
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
-            <h1 style="font-size: 36px; font-weight: 800; color: #ffffff; margin: 0; letter-spacing: -1px;">ALLUVI</h1>
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
+            <h1 style="font-size: 36px; font-weight: 500; color: #ffffff; margin: 0; letter-spacing: -1px;">${storeName.toUpperCase()}</h1>
             <p style="margin: 14px 0 0 0; color: rgba(255,255,255,0.92); font-size: 14px;">Order Update & Tracking</p>
           </div>
 
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 26px; font-weight: 750; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Important information about your order</h2>
+            <h2 style="font-size: 26px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Important information about your order</h2>
 
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Dear ${customerInfoName || 'Customer'},</p>
 
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">We are currently processing orders for customers on our waiting list and are working diligently to full fill them in first come first serve.</p>
 
-            <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">In the meantime, you may track the status of your order using our newly launched tracking feature, you can also pay on it after you have got your email for added reassurance from the official www.alluvi.org website:</p>
+            <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">In the meantime, you may track the status of your order using our newly launched tracking feature, you can also pay on it after you have got your email for added reassurance from the official ${storeName} website:</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 22px; margin: 22px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 22px 0; border-radius: 8px;">
               <div style="font-size: 12px; font-weight: 700; color: #666; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 1px;">Track your order</div>
               <div style="font-size: 15px; color: #1a1a1a; line-height: 1.7; word-break: break-word;">${trackUrl}</div>
             </div>
 
             <div style="text-align: center; margin: 26px 0;">
-              <a href="${trackUrl}" style="display: inline-block; background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 700; font-size: 16px;">Open Tracking Page</a>
+              <a href="${trackUrl}" style="display: inline-block; background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 700; font-size: 16px;">Open Tracking Page</a>
             </div>
 
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">To access your order information, simply enter your email address on the tracking page. A One-Time Passcode (OTP) will be sent to your email, allowing you to view the status of all orders associated with that email address.</p>
@@ -958,7 +1000,7 @@ const getEmailTemplate = (type, data) => {
 
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">We will continue sending payment request emails until all waiting list orders have been fully addressed.</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 22px; margin: 22px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 22px 0; border-radius: 8px;">
               <div style="font-size: 12px; font-weight: 700; color: #666; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 1px;">Need help?</div>
               <div style="font-size: 15px; color: #1a1a1a; line-height: 1.7;">We have introduced a live chat feature on our website to assist you with any questions or concerns regarding your order. Our team is here to support you.</div>
             </div>
@@ -969,8 +1011,8 @@ const getEmailTemplate = (type, data) => {
           </div>
 
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
-            <p style="font-size: 14px; color: #999; margin: 8px 0;">For any questions, please contact us via Live Chat on <a href="https://alluvi.org" style="color: #FF8200; text-decoration: none;">Alluvi usa</a>.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;">For any questions, please contact us via Live Chat on <a href="${storeUrl}" style="color: #2563EB; text-decoration: none;">${storeName}</a>.</p>
           </div>
         </div>
       `;
@@ -983,12 +1025,12 @@ const getEmailTemplate = (type, data) => {
     case 'tracking_otp':
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
             ${headerLogoHtml}
             <p style="margin: 14px 0 0 0; color: rgba(255,255,255,0.92); font-size: 14px;">Track Order Verification</p>
           </div>
           <div style="padding: 46px 40px;">
-            <h2 style="font-size: 22px; font-weight: 700; color: #1c1c1c; margin: 0 0 14px 0; line-height: 1.3;">Your one-time code</h2>
+            <h2 style="font-size: 22px; font-weight: 200; color: #1c1c1c; margin: 0 0 14px 0; line-height: 1.3;">Your one-time code</h2>
 
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">Use this code to access your order details:</p>
 
@@ -999,7 +1041,7 @@ const getEmailTemplate = (type, data) => {
             <p style="margin: 10px 0 0 0; font-size: 13px; color: #666; line-height: 1.7;">If you did not request this, you can ignore this email.</p>
           </div>
           <div style="padding: 20px 40px 30px; text-align: center; color: #888; font-size: 12px;">
-            &copy; ${new Date().getFullYear()} Alluvi
+            &copy; ${new Date().getFullYear()} ${storeName}
           </div>
         </div>
       `;
@@ -1008,34 +1050,33 @@ const getEmailTemplate = (type, data) => {
     case 'payment_capture':
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
+          <div style="background: linear-gradient(135deg, #2d2d2d 0%, #1D4ED8 100%); padding: 20px 40px; text-align: center; color: #ededed">
             ${headerLogoHtml}
             <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Payment Required</p>
           </div>
-          <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 800; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;"><strong>Complete Your Payment.</strong></h2>
+          <div style="padding: 20px 40px;">
 
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">Hi ${String(data?.customerName || '').trim() || 'there'},</p>
 
-            <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">You recently placed an order request on Alluvi. No payment was taken at that time.</p>
-            <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">This email contains your secure link to pay for that order.</p>
+            <p style="font-size: 16px; color: #4a4a4a; margin: 0 0 16px 0;">You recently placed an order request on ${storeName}. No payment was taken at that time.</p>
+            <p style="font-size: 16px; color: #4a4a4a; margin: 0 0 16px 0;">This email contains your secure link to pay for that order.</p>
 
-            <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 10px 0;">If you complete payment before 2 pm (Mon to Fri), your order will ship the same day for next day delivery.</p>
-            <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">Payments made after 2 pm will ship the next working day.</p>
+            <p style="font-size: 15px; color: #4a4a4a; margin: 0 0 10px 0;">If you complete payment before 2 pm (Mon to Fri), your order will ship the same day for next day delivery.</p>
+            <p style="font-size: 15px; color: #4a4a4a; margin: 0 0 18px 0;">Payments made after 2 pm will ship the next working day.</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 22px; margin: 22px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 22px 0; border-radius: 8px;">
               <div style="margin-bottom: 12px;">
                 <div style="font-size: 12px; font-weight: 600; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
                 <div style="font-size: 18px; font-weight: 800; color: #1a1a1a;">${String(data?.orderNumber || '').trim()}</div>
               </div>
               <div style="margin-bottom: 12px;">
                 <div style="font-size: 12px; font-weight: 600; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Amount</div>
-                <div style="font-size: 20px; font-weight: 800; color: #FF8200;">£${Number(data?.total || 0).toFixed(2)} ${String(data?.currency || 'GBP').trim() || 'GBP'}</div>
+                <div style="font-size: 20px; font-weight: 800; color: #2563EB;">$${Number(data?.total || 0).toFixed(2)}</div>
               </div>
             </div>
 
             <div style="text-align: center; margin: 26px 0;">
-              <a href="${String(data?.paymentLink || '').trim()}" style="display: inline-block; background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 700; font-size: 16px;">Open Secure Payment Page</a>
+              <a href="${String(data?.paymentLink || '').trim()}" style="display: inline-block; background: #1744a9; color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 700; font-size: 16px;">Open Secure Payment Page</a>
             </div>
 
             <h3 style="font-size: 18px; font-weight: 800; color: #1a1a1a; margin: 10px 0 12px 0;"><strong>How to complete your payment</strong></h3>
@@ -1047,40 +1088,40 @@ const getEmailTemplate = (type, data) => {
               <div style="margin: 0;">Once we confirm your payment, you will receive another email and your order will move to shipping.</div>
             </div>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 22px; margin: 22px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 22px 0; border-radius: 8px;">
               <div style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 12px 0;">
-                If you need help, you can message us on Live Chat on the official website <strong>www.alluvi.org</strong>,
+                If you need help, you can message us on Live Chat on the official website <strong>${storeUrl}</strong>,
                 <br/>or use the button below to contact us via Live Chat.
               </div>
               <div style="text-align: center; margin: 0;">
-                <a href="https://alluvi.org/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact Alluvi Support</a>
+                <a href="${storeUrl}/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact ${storeName} Support</a>
               </div>
             </div>
 
             <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">If you did not place this order, you can safely ignore this email.</p>
           </div>
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
           </div>
         </div>
       `;
       break;
 
     case 'payment_successful':
-      const paymentPublicBase = String(process.env.PUBLIC_BASE_URL || process.env.PUBLIC_API_BASE_URL || 'https://www.alluvi.org').replace(/\/$/, '');
+      const paymentPublicBase = String(process.env.PUBLIC_BASE_URL || process.env.PUBLIC_API_BASE_URL || storeUrl).replace(/\/$/, '');
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
+          <div style="background: #1e1e1e; padding: 30px 40px; text-align: center;">
             ${headerLogoHtml}
             <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Payment Successful</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 700; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Your order will now be prepared for shipping!</h2>
+            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Your order will now be prepared for shipping!</h2>
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">Hi ${String(data?.customerName || '').trim() || 'there'},</p>
 
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 10px 0;">We have successfully verified your payment. Your order will now be prepared for shipping.</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 22px; margin: 18px 0 18px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 18px 0 18px 0; border-radius: 8px;">
               <div style="font-size: 14px; line-height: 1.7; color: #4a4a4a; margin: 0;">
                 Orders are typically processed within 2 working days. Once your order is dispatched, you will receive a separate email with your tracking details. Please keep an eye on your inbox (and spam/junk folder) for updates.
               </div>
@@ -1091,13 +1132,13 @@ const getEmailTemplate = (type, data) => {
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 22px 0;">You can also check the progress of your order by logging in and going to the Track Orders page. Your tracking number will appear there once the parcel has been shipped.</p>
 
             <div style="text-align: center; margin: 26px 0 0; display: flex; flex-direction: column; gap: 12px; align-items: center;">
-              <a href="${paymentPublicBase}/track-order" style="display: inline-block; background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Track your order</a>
-              <a href="https://alluvi.org/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact Alluvi Support</a>
+              <a href="${storeUrl}/track-order?order=${data?.orderNumber}" style="display: inline-block; background: #3569d9; color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 500; font-size: 16px; margin-right: 20px;">Track your order</a>
+              <a href="${storeUrl}" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 10px; font-weight: 500; font-size: 14px;">Contact ${storeName} Support</a>
             </div>
           </div>
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
-            <p style="font-size: 14px; color: #999; margin: 8px 0;">For help, contact us via Live Chat on <a href="https://alluvi.org" style="color: #FF8200; text-decoration: none;">Alluvi usa</a>.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;">For help, contact us via Live Chat on <a href="${storeUrl}" style="color: #e8eaf0; text-decoration: none;">${storeName}</a>.</p>
           </div>
         </div>
       `;
@@ -1106,19 +1147,19 @@ const getEmailTemplate = (type, data) => {
     case 'payment_screenshot_received':
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
             ${headerLogoHtml}
             <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Payment Screenshot Received</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 800; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Thank you for your submission</h2>
+            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Thank you for your submission</h2>
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Hi ${safeText(data?.customerName, 'there')},</p>
 
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 14px 0;">Thank you for uploading your payment screenshot.</p>
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 14px 0;">Our team will now review your submission and verify your payment manually. Once verification is complete, we will email you with an update on your payment status.</p>
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">Please keep an eye on your inbox (and your spam/junk folder, just in case).</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 22px; margin: 22px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 22px 0; border-radius: 8px;">
               ${safeText(data?.orderNumber, '') ? `
                 <div style="margin-bottom: 12px;">
                   <div style="font-size: 12px; font-weight: 700; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
@@ -1133,15 +1174,15 @@ const getEmailTemplate = (type, data) => {
               ` : ''}
             </div>
 
-            <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Thank you for your patience and cooperation, and thank you for shopping with Alluvi.</p>
+            <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Thank you for your patience and cooperation, and thank you for shopping with ${storeName}.</p>
 
             <div style="text-align: center; margin: 22px 0 0;">
-              <a href="https://alluvi.org/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact Alluvi Support</a>
+              <a href="${storeUrl}/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact ${storeName} Support</a>
             </div>
           </div>
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
-            <p style="font-size: 14px; color: #999; margin: 8px 0;">For help, contact us via Live Chat on <a href="https://alluvi.org" style="color: #FF8200; text-decoration: none;">Alluvi usa</a>.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;">For help, contact us via Live Chat on <a href="${storeUrl}" style="color: #2563EB; text-decoration: none;">${storeName}</a>.</p>
           </div>
         </div>
       `;
@@ -1151,12 +1192,12 @@ const getEmailTemplate = (type, data) => {
       content = `
         <div style="background: #f3f3f3; padding: 24px 14px;">
           <div style="max-width: 650px; margin: 0 auto; background: #ffffff; border-radius: 12px; box-shadow: 0 6px 22px rgba(0,0,0,0.10); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-            <div style="background: #FF8200; padding: 44px 40px; text-align: center;">
+            <div style="background: #282828; padding: 44px 40px; text-align: center;">
               ${headerLogoHtml}
-              <p style="font-size: 12px; font-style: italic; color: rgba(255,255,255,0.92); margin: 10px 0 0 0;">Payment Declined</p>
+              <p style="font-size: 12px; color: rgba(255,255,255,0.92); margin: 10px 0 0 0;">Payment Declined</p>
             </div>
             <div style="padding: 42px 40px 30px 40px;">
-              <h2 style="font-size: 28px; font-weight: 900; color: #111; margin: 0 0 16px 0; line-height: 1.2;">We couldn’t verify your payment</h2>
+              <h2 style="font-size: 28px; font-weight: 200; color: #111; margin: 0 0 16px 0; line-height: 1.2;">We couldn’t verify your payment</h2>
               <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0 0 12px 0;">Hi ${String(data?.customerName || '').trim() || 'there'},</p>
 
               <p style="font-size: 13px; line-height: 1.7; color: #666; margin: 0 0 16px 0;">Our automated verification couldn’t confirm your payment. Please upload a clearer payment screenshot and try again.</p>
@@ -1178,15 +1219,15 @@ const getEmailTemplate = (type, data) => {
 
               ${data?.retryLink ? `
                 <div style="text-align: center; margin: 18px 0 22px;">
-                  <a href="${data.retryLink}" style="display: inline-block; background: #FF8200; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 900; font-size: 13px;">Try Payment Again</a>
+                  <a href="${data.retryLink}" style="display: inline-block; background: #1040a9; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 500; font-size: 13px;">Try Payment Again</a>
                 </div>
               ` : ''}
 
               <p style="font-size: 12px; line-height: 1.7; color: #777; margin: 0;">If you did not place this order, you can safely ignore this email.</p>
             </div>
             <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 34px 24px; text-align: center;">
-              <p style="font-size: 11px; color: #aaa; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
-              <p style="font-size: 11px; color: #aaa; margin: 8px 0;">For help, contact us via Live Chat on <a href="https://alluvi.org" style="color: #FF8200; text-decoration: none; font-weight: 800;">Alluvi usa</a>.</p>
+              <p style="font-size: 11px; color: #aaa; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+              <p style="font-size: 11px; color: #aaa; margin: 8px 0;">For help, contact us via Live Chat on <a href="${storeUrl}" style="color: #f6f7f8; text-decoration: none; font-weight: 800;">${storeName}</a>.</p>
             </div>
           </div>
         </div>
@@ -1206,21 +1247,21 @@ const getEmailTemplate = (type, data) => {
       
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
-            <h1 style="font-size: 36px; font-weight: 800; color: #ffffff; margin: 0; letter-spacing: -1px;">ALLUVI</h1>
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
+            <h1 style="font-size: 36px; font-weight: 500; color: #ffffff; margin: 0; letter-spacing: -1px;">${storeName.toUpperCase()}</h1>
             <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Premium Research Peptides</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 700; color: #1a1a1a; margin: 0 0 25px 0; line-height: 1.3;">Order Status Update</h2>
+            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 25px 0; line-height: 1.3;">Order Status Update</h2>
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 25px 0;">Hi ${data.customerName},</p>
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 25px 0;">Your order status has been updated.</p>
             
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 25px; margin: 25px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 25px; margin: 25px 0; border-radius: 8px;">
               <div style="font-size: 12px; font-weight: 600; color: #666; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
               <div style="font-size: 20px; font-weight: 700; color: #1a1a1a; margin: 0;">${data.orderNumber}</div>
             </div>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 25px; margin: 25px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 25px; margin: 25px 0; border-radius: 8px;">
               <div style="font-size: 12px; font-weight: 600; color: #666; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 1px;">New Status</div>
               <div><span style="display: inline-block; padding: 8px 16px; border-radius: 20px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; background: ${statusBg}; color: #1a1a1a;">${data.status}</span></div>
             </div>
@@ -1228,8 +1269,8 @@ const getEmailTemplate = (type, data) => {
             ${data.message ? `<p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 25px 0;">${data.message}</p>` : ''}
           </div>
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> 2024 Alluvi. All rights reserved.</p>
-            <p style="font-size: 14px; color: #999; margin: 8px 0;">For any questions, please contact us via Live Chat on <a href="https://alluvi.org" style="color: #FF8200; text-decoration: none;">Alluvi usa</a>.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${storeName}. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;">For any questions, please contact us via Live Chat on <a href="${storeUrl}" style="color: #2563EB; text-decoration: none;">${storeName}</a>.</p>
           </div>
         </div>
       `;
@@ -1240,12 +1281,12 @@ const getEmailTemplate = (type, data) => {
       const trackUrl = tn ? `https://www.royalmail.com/track-your-item#/tracking-results/${encodeURIComponent(tn)}` : '';
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
             ${headerLogoHtml}
             <p style="margin: 14px 0 0 0; color: rgba(255,255,255,0.92); font-size: 14px;">Delivery Update</p>
           </div>
           <div style="padding: 46px 40px;">
-            <h2 style="margin: 0 0 14px 0; font-size: 22px; color: #1c1c1c;">Your order is out for delivery</h2>
+            <h2 style="margin: 0 0 14px 0; font-size: 22px; font-weight: 200; color: #1c1c1c;">Your order is out for delivery</h2>
             <p style="margin: 0 0 18px 0; font-size: 14px; color: #444; line-height: 1.7;">Hi ${String(data?.customerName || '').trim() || 'there'},</p>
             <p style="margin: 0 0 18px 0; font-size: 14px; color: #444; line-height: 1.7;">Great news! Your order should arrive soon.</p>
 
@@ -1262,7 +1303,7 @@ const getEmailTemplate = (type, data) => {
 
             ${trackUrl ? `
               <div style="text-align: center; margin: 18px 0 0 0;">
-                <a href="${trackUrl}" target="_blank" rel="noopener noreferrer" style="display: inline-block; background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 700; font-size: 16px;">Track Now</a>
+                <a href="${trackUrl}" target="_blank" rel="noopener noreferrer" style="display: inline-block; background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 700; font-size: 16px;">Track Now</a>
               </div>
             ` : ''}
 
@@ -1277,7 +1318,7 @@ const getEmailTemplate = (type, data) => {
 
           </div>
           <div style="padding: 20px 40px 30px; text-align: center; color: #888; font-size: 12px;">
-            &copy; ${new Date().getFullYear()} Alluvi
+            &copy; ${new Date().getFullYear()} ${storeName}
           </div>
         </div>
       `;
@@ -1289,10 +1330,10 @@ const getEmailTemplate = (type, data) => {
         <div class="email-container">
           ${baseStyle}
           <div class="email-header">
-            <h1 class="email-logo">ALLUVI</h1>
+            <h1 class="email-logo" style="font-weight: 500;">${storeName.toUpperCase()}</h1>
           </div>
           <div class="email-body">
-            <h2 class="email-title">Your Order Has Been Delivered! </h2>
+            <h2 class="email-title" style="font-weight: 200;">Your Order Has Been Delivered! </h2>
             <p class="email-text">Hi ${data.customerName},</p>
             <p class="email-text">Your order has been successfully delivered. We hope you enjoy your purchase!</p>
             
@@ -1303,11 +1344,11 @@ const getEmailTemplate = (type, data) => {
 
             <p class="email-text" style="margin-top: 30px;">If you have any questions or concerns about your order, please don't hesitate to contact us.</p>
             
-            <p class="email-text">Thank you for shopping with Alluvi!</p>
+            <p class="email-text">Thank you for shopping with ${storeName}!</p>
           </div>
           <div class="email-footer">
-            <p class="email-footer-text"> 2024 Alluvi. All rights reserved.</p>
-            <p class="email-footer-text">Need help? Contact us at support@alluvi.com</p>
+            <p class="email-footer-text"> ${storeName}. All rights reserved.</p>
+            <p class="email-footer-text">Need help? Contact us at support@${storeDomain}</p>
           </div>
         </div>
       `;
@@ -1318,10 +1359,10 @@ const getEmailTemplate = (type, data) => {
         <div class="email-container">
           ${baseStyle}
           <div class="email-header">
-            <h1 class="email-logo">ALLUVI</h1>
+            <h1 class="email-logo" style="font-weight: 500;">${storeName.toUpperCase()}</h1>
           </div>
           <div class="email-body">
-            <h2 class="email-title">Order Cancelled</h2>
+            <h2 class="email-title" style="font-weight: 200;">Order Cancelled</h2>
             <p class="email-text">Hi ${data.customerName},</p>
             <p class="email-text">Your order has been cancelled as requested.</p>
             
@@ -1333,8 +1374,8 @@ const getEmailTemplate = (type, data) => {
             <p class="email-text" style="margin-top: 20px;">If you didn't request this cancellation or have any questions, please contact us immediately.</p>
           </div>
           <div class="email-footer">
-            <p class="email-footer-text"> 2024 Alluvi. All rights reserved.</p>
-            <p class="email-footer-text">Need help? Contact us at support@alluvi.com</p>
+            <p class="email-footer-text"> ${storeName}. All rights reserved.</p>
+            <p class="email-footer-text">Need help? Contact us at support@${storeDomain}</p>
           </div>
         </div>
       `;
@@ -1344,18 +1385,17 @@ const getEmailTemplate = (type, data) => {
       const name = String(data?.customerName || '').trim() || 'there';
       const orderNumber = String(data?.orderNumber || '').trim();
       const amount = Number(data?.amount || data?.total || 0);
-      const currency = String(data?.currency || 'GBP').trim() || 'GBP';
-      const trackUrl = String(data?.trackUrl || 'https://www.alluvi.org/track-order').trim();
+      const trackUrl = String(data?.trackUrl || `${storeUrl}/track-order`).trim();
 
       content = `
         <div style="background: #f3f3f3; padding: 24px 14px;">
           <div style="max-width: 650px; margin: 0 auto; background: #ffffff; border-radius: 12px; box-shadow: 0 6px 22px rgba(0,0,0,0.10); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-            <div style="background: #FF8200; padding: 44px 40px; text-align: center;">
+            <div style="background: #2563EB; padding: 44px 40px; text-align: center;">
               ${headerLogoHtml}
               <p style="font-size: 12px; font-style: italic; color: rgba(255,255,255,0.92); margin: 10px 0 0 0;">Refund Initiated</p>
             </div>
             <div style="padding: 42px 40px 30px 40px;">
-              <h2 style="font-size: 28px; font-weight: 900; color: #111; margin: 0 0 16px 0; line-height: 1.2;">Your refund has been initiated</h2>
+              <h2 style="font-size: 28px; font-weight: 200; color: #111; margin: 0 0 16px 0; line-height: 1.2;">Your refund has been initiated</h2>
               <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0 0 12px 0;">Hi ${name},</p>
 
               <p style="font-size: 13px; line-height: 1.7; color: #666; margin: 0 0 16px 0;">We have initiated a refund for your order. The refunded amount will be returned to the same payment method you used for the purchase. Depending on your bank, it may take a few business days to appear on your statement.</p>
@@ -1369,16 +1409,16 @@ const getEmailTemplate = (type, data) => {
                 ` : ''}
                 <div>
                   <div style="font-size: 10px; font-weight: 800; color: #777; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Refund Amount</div>
-                  <div style="font-size: 14px; font-weight: 900; color: #ef4444;">£${Number.isFinite(amount) ? amount.toFixed(2) : '0.00'} ${currency}</div>
+                  <div style="font-size: 14px; font-weight: 900; color: #ef4444;">$${Number.isFinite(amount) ? amount.toFixed(2) : '0.00'}</div>
                 </div>
               </div>
 
               <div style="text-align: center; margin: 18px 0 0;">
-                <a href="${trackUrl}" style="display: inline-block; background: #FF8200; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 900; font-size: 13px;">Open Track Order</a>
+                <a href="${trackUrl}" style="display: inline-block; background: #2563EB; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 900; font-size: 13px;">Open Track Order</a>
               </div>
             </div>
             <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 34px 24px; text-align: center;">
-              <p style="font-size: 11px; color: #aaa; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
+              <p style="font-size: 11px; color: #aaa; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
             </div>
           </div>
         </div>
@@ -1391,41 +1431,41 @@ const getEmailTemplate = (type, data) => {
       const promoCode = safeText(data?.promoCode, '').trim().toUpperCase();
       const percent = Number.isFinite(Number(data?.percent)) ? Number(data.percent) : 10;
       const rewardAmount = Number.isFinite(Number(data?.rewardAmount)) ? Number(data.rewardAmount) : 40;
-      const welcomePublicBase = String(process.env.PUBLIC_BASE_URL || process.env.PUBLIC_API_BASE_URL || 'https://www.alluvi.org').replace(/\/$/, '');
+      const welcomePublicBase = String(process.env.PUBLIC_BASE_URL || process.env.PUBLIC_API_BASE_URL || storeUrl).replace(/\/$/, '');
       const dashboardUrl = `${welcomePublicBase}/track-order`;
       const tiktokShareUrl = `https://www.tiktok.com/upload?lang=en`;
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
             ${headerLogoHtml}
-            <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Welcome to the Alluvi Affiliate Program</p>
+            <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Welcome to the ${storeName} Affiliate Program</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 800; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">You're in, ${firstName}.</h2>
-            <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Your affiliate code is live. Every time someone uses it at checkout, they save ${percent}% and you earn £${rewardAmount.toFixed(2)} in Alluvi credit per unique paying customer.</p>
+            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">You're in, ${firstName}.</h2>
+            <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Your affiliate code is live. Every time someone uses it at checkout, they save ${percent}% and you earn $${rewardAmount.toFixed(2)} in ${storeName} credit per unique paying customer.</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 24px; margin: 22px 0; border-radius: 8px; text-align: center;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 24px; margin: 22px 0; border-radius: 8px; text-align: center;">
               <div style="font-size: 13px; color: #666; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px;">Your promo code</div>
-              <div style="font-size: 32px; font-weight: 800; color: #FF8200; letter-spacing: 2px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;">${promoCode}</div>
-              <div style="font-size: 13px; color: #666; margin-top: 12px;">${percent}% off for buyers · £${rewardAmount.toFixed(2)} credit for you</div>
+              <div style="font-size: 32px; font-weight: 800; color: #2563EB; letter-spacing: 2px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;">${promoCode}</div>
+              <div style="font-size: 13px; color: #666; margin-top: 12px;">${percent}% off for buyers · $${rewardAmount.toFixed(2)} credit for you</div>
             </div>
 
             <h3 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 30px 0 12px 0;">How to share on TikTok</h3>
             <div style="background: #fff8f0; border: 1px solid #ffe0bf; padding: 20px; margin: 0 0 22px 0; border-radius: 8px;">
               <p style="font-size: 14px; line-height: 1.7; color: #4a4a4a; margin: 0 0 10px 0;">Drop your code in your bio, captions, or pinned comments. A simple opener that works:</p>
-              <div style="background: #ffffff; border: 1px dashed #ffb573; padding: 14px; border-radius: 6px; font-style: italic; color: #1a1a1a; font-size: 14px; line-height: 1.6;">"Use code <strong>${promoCode}</strong> at Alluvi usa for ${percent}% off your first order."</div>
+              <div style="background: #ffffff; border: 1px dashed #ffb573; padding: 14px; border-radius: 6px; font-style: italic; color: #1a1a1a; font-size: 14px; line-height: 1.6;">"Use code <strong>${promoCode}</strong> at ${storeName} for ${percent}% off your first order."</div>
             </div>
 
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 22px 0;">Track your redemptions and credit balance from your Track Orders page anytime.</p>
 
             <div style="text-align: center; margin: 26px 0 0; display: flex; flex-direction: column; gap: 12px; align-items: center;">
-              <a href="${dashboardUrl}" style="display: inline-block; background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Open your dashboard</a>
+              <a href="${dashboardUrl}" style="display: inline-block; background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Open your dashboard</a>
               <a href="${tiktokShareUrl}" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Post on TikTok</a>
             </div>
           </div>
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
-            <p style="font-size: 14px; color: #999; margin: 8px 0;">Questions? Reach us via Live Chat on <a href="https://alluvi.org" style="color: #FF8200; text-decoration: none;">Alluvi usa</a>.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;">Questions? Reach us via Live Chat on <a href="${storeUrl}" style="color: #2563EB; text-decoration: none;">${storeName}</a>.</p>
           </div>
         </div>
       `;
@@ -1437,42 +1477,42 @@ const getEmailTemplate = (type, data) => {
       const promoCode = safeText(data?.promoCode, '').trim().toUpperCase();
       const rewardAmount = Number.isFinite(Number(data?.rewardAmount)) ? Number(data.rewardAmount) : 40;
       const newBalance = Number.isFinite(Number(data?.newBalance)) ? Number(data.newBalance) : null;
-      const redemptionPublicBase = String(process.env.PUBLIC_BASE_URL || process.env.PUBLIC_API_BASE_URL || 'https://www.alluvi.org').replace(/\/$/, '');
+      const redemptionPublicBase = String(process.env.PUBLIC_BASE_URL || process.env.PUBLIC_API_BASE_URL || storeUrl).replace(/\/$/, '');
       const dashboardUrl = `${redemptionPublicBase}/track-order`;
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
             ${headerLogoHtml}
             <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Promo Code Redeemed</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 800; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">You just earned £${rewardAmount.toFixed(2)}, ${firstName}.</h2>
-            <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Someone used your affiliate code <strong>${promoCode}</strong> at checkout and their order has been paid. £${rewardAmount.toFixed(2)} in Alluvi credit has been added to your balance.</p>
+            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">You just earned $${rewardAmount.toFixed(2)}, ${firstName}.</h2>
+            <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Someone used your affiliate code <strong>${promoCode}</strong> at checkout and their order has been paid. $${rewardAmount.toFixed(2)} in ${storeName} credit has been added to your balance.</p>
 
             <div style="background: #f8f9fa; border-left: 4px solid #00d4aa; padding: 24px; margin: 22px 0; border-radius: 8px;">
               <div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
                 <div>
                   <div style="font-size: 13px; color: #666; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px;">Reward earned</div>
-                  <div style="font-size: 22px; font-weight: 800; color: #00b894;">+ £${rewardAmount.toFixed(2)}</div>
+                  <div style="font-size: 22px; font-weight: 800; color: #00b894;">+ $${rewardAmount.toFixed(2)}</div>
                 </div>
                 ${newBalance !== null ? `
                 <div style="text-align: right;">
                   <div style="font-size: 13px; color: #666; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px;">New balance</div>
-                  <div style="font-size: 22px; font-weight: 800; color: #1a1a1a;">£${newBalance.toFixed(2)}</div>
+                  <div style="font-size: 22px; font-weight: 800; color: #1a1a1a;">$${newBalance.toFixed(2)}</div>
                 </div>
                 ` : ''}
               </div>
             </div>
 
-            <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 22px 0;">Keep sharing your code — every unique paying customer adds another £${rewardAmount.toFixed(2)} to your balance.</p>
+            <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 22px 0;">Keep sharing your code — every unique paying customer adds another $${rewardAmount.toFixed(2)} to your balance.</p>
 
             <div style="text-align: center; margin: 26px 0 0;">
-              <a href="${dashboardUrl}" style="display: inline-block; background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">View dashboard</a>
+              <a href="${dashboardUrl}" style="display: inline-block; background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">View dashboard</a>
             </div>
           </div>
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
-            <p style="font-size: 14px; color: #999; margin: 8px 0;">Questions? Reach us via Live Chat on <a href="https://alluvi.org" style="color: #FF8200; text-decoration: none;">Alluvi usa</a>.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;">Questions? Reach us via Live Chat on <a href="${storeUrl}" style="color: #2563EB; text-decoration: none;">${storeName}</a>.</p>
           </div>
         </div>
       `;
@@ -1493,37 +1533,37 @@ const getEmailTemplate = (type, data) => {
 
           <p style="font-size: 16px; line-height: 1.7; color: #1a1a1a; margin: 0 0 20px 0;">Good luck.</p>
 
-          <p style="font-size: 16px; line-height: 1.7; color: #1a1a1a; margin: 0 0 4px 0;">— The Alluvi team</p>
-          <p style="font-size: 13px; line-height: 1.6; color: #888; margin: 0 0 28px 0;"><a href="https://alluvi.org" style="color: #888; text-decoration: underline;">Alluvi usa</a></p>
+          <p style="font-size: 16px; line-height: 1.7; color: #1a1a1a; margin: 0 0 4px 0;">— The ${storeName} team</p>
+          <p style="font-size: 13px; line-height: 1.6; color: #888; margin: 0 0 28px 0;"><a href="${storeUrl}" style="color: #888; text-decoration: underline;">${storeName}</a></p>
 
           <hr style="border: none; border-top: 1px solid #eaeaea; margin: 24px 0;" />
 
-          <p style="font-size: 11px; line-height: 1.55; color: #999; margin: 0;">You're receiving this because you entered the Alluvi giveaway at Alluvi usa. Alluvi products are supplied for in vitro R&amp;D only — not for human or veterinary use. To opt out, reply with "unsubscribe".</p>
+          <p style="font-size: 11px; line-height: 1.55; color: #999; margin: 0;">You're receiving this because you entered the ${storeName} giveaway at ${storeName}. ${storeName} products are supplied for in vitro R&amp;D only — not for human or veterinary use. To opt out, reply with "unsubscribe".</p>
         </div>
       `;
       break;
     }
 
     case 'newsletter_winner': {
-      const claimUrl = safeText(data?.claimUrl, '').trim() || `mailto:info@alluvi.org?subject=Giveaway%20winner%20-%20claim%20my%20prize`;
+      const claimUrl = safeText(data?.claimUrl, '').trim() || `mailto:info@${storeDomain}?subject=Giveaway%20winner%20-%20claim%20my%20prize`;
       const productName = safeText(data?.productName, 'Retatrutide 40mg pen');
       const claimDeadline = safeText(data?.claimDeadline, '14 days');
       const firstName = safeText(data?.firstName, '').trim() || 'there';
       content = `
         <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); padding: 50px 40px; text-align: center;">
+          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
             <div style="font-size: 22px; line-height: 1; letter-spacing: 6px; margin: 0 0 10px 0;" aria-hidden="true">🎉&nbsp;&nbsp;✨&nbsp;&nbsp;🎊&nbsp;&nbsp;✨&nbsp;&nbsp;🎉</div>
             <div style="font-size: 64px; line-height: 1; margin: 0 0 14px 0;" aria-hidden="true">🏆</div>
             ${headerLogoHtml}
             <p style="font-size: 14px; color: rgba(255,255,255,0.95); margin: 10px 0 0 0; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;">You won!</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 800; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Congratulations, ${firstName} — you've won!</h2>
-            <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Brilliant news. Your email was drawn for this month's Alluvi giveaway. The prize is yours: a free <strong>${productName}</strong>, on us.</p>
+            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Congratulations, ${firstName} — you've won!</h2>
+            <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Brilliant news. Your email was drawn for this month's ${storeName} giveaway. The prize is yours: a free <strong>${productName}</strong>, on us.</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #FF8200; padding: 24px; margin: 22px 0; border-radius: 8px; text-align: center;">
+            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 24px; margin: 22px 0; border-radius: 8px; text-align: center;">
               <div style="font-size: 13px; color: #666; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px;">Your prize</div>
-              <div style="font-size: 24px; font-weight: 800; color: #FF8200; letter-spacing: 0.5px;">${productName}</div>
+              <div style="font-size: 24px; font-weight: 800; color: #2563EB; letter-spacing: 0.5px;">${productName}</div>
               <div style="font-size: 13px; color: #666; margin-top: 12px;">For in vitro research use only · Janoshik-tested · Cold-chain shipping</div>
             </div>
 
@@ -1531,14 +1571,14 @@ const getEmailTemplate = (type, data) => {
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 14px 0;">Click below within <strong>${claimDeadline}</strong> and reply to this email with your delivery details. We'll dispatch your prize the next working day. After ${claimDeadline}, the prize rolls over to next month's draw.</p>
 
             <div style="text-align: center; margin: 26px 0 0;">
-              <a href="${claimUrl}" style="display: inline-block; background: linear-gradient(135deg, #FF8200 0%, #E67700 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Claim your prize</a>
+              <a href="${claimUrl}" style="display: inline-block; background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Claim your prize</a>
             </div>
 
-            <p style="font-size: 12px; line-height: 1.6; color: #999; margin: 30px 0 0 0; text-align: center;">If you have any trouble, reply directly to this email and we'll sort it out. Alluvi products are supplied for in vitro R&amp;D only.</p>
+            <p style="font-size: 12px; line-height: 1.6; color: #999; margin: 30px 0 0 0; text-align: center;">If you have any trouble, reply directly to this email and we'll sort it out. ${storeName} products are supplied for in vitro R&amp;D only.</p>
           </div>
           <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} Alluvi. All rights reserved.</p>
-            <p style="font-size: 14px; color: #999; margin: 8px 0;">Questions? Reach us via Live Chat on <a href="https://alluvi.org" style="color: #FF8200; text-decoration: none;">Alluvi usa</a>.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+            <p style="font-size: 14px; color: #999; margin: 8px 0;">Questions? Reach us via Live Chat on <a href="${storeUrl}" style="color: #2563EB; text-decoration: none;">${storeName}</a>.</p>
           </div>
         </div>
       `;
@@ -1556,8 +1596,8 @@ const getEmailTemplate = (type, data) => {
     }
 
     content = content
-      .replace(/background:\s*linear-gradient\(135deg,\s*#FF8200\s*0%,\s*#E67700\s*100%\)/gi, 'background: #FF8200')
-      .replace(/background:\s*linear-gradient\(135deg,\s*#ff8200\s*0%,\s*#e67700\s*100%\)/gi, 'background: #FF8200');
+      .replace(/background:\s*linear-gradient\(135deg,\s*#2563EB\s*0%,\s*#1D4ED8\s*100%\)/gi, 'background: #2563EB')
+      .replace(/background:\s*linear-gradient\(135deg,\s*#2563eb\s*0%,\s*#1d4ed8\s*100%\)/gi, 'background: #2563EB');
   } catch {
     // ignore
   }
@@ -1614,7 +1654,7 @@ export const sendEmail = async (to, subject, type, data, opts = {}) => {
         htmlContent = String(htmlContent || '').replaceAll(`cid:${ALLUVI_LOGO_CID}`, logoUrl);
       } catch {}
 
-      const r = await sendEmailViaResend({ to, subject, html: htmlContent, text: plainText, headers });
+      const r = await sendEmailViaResend({ to, subject, html: htmlContent, text: plainText, headers, from: opts?.from, fromName: opts?.fromName });
       if (!r?.success) {
         console.error(' Resend send failed:', r?.error, r?.details ? { details: r.details } : '');
         return { success: false, error: r?.error || 'Resend send failed' };
@@ -1638,9 +1678,10 @@ export const sendEmail = async (to, subject, type, data, opts = {}) => {
 
     const transporter = createTransporter();
 
-    const nodemailerFromNameRaw = env('EMAIL_FROM_NAME', 'Team Alluvi');
-    const nodemailerFromName = /klyme/i.test(nodemailerFromNameRaw) ? 'Alluvi' : nodemailerFromNameRaw;
     const nodemailerFromEmail = env('EMAIL_FROM_EMAIL', process.env.EMAIL_USER || 'info@alluvi.org');
+    const nodemailerFromDomain = getStoreDomain(data) || nodemailerFromEmail.split('@')[1] || 'alluvi.org';
+    const nodemailerFromNameRaw = env('EMAIL_FROM_NAME', nodemailerFromDomain);
+    const nodemailerFromName = /klyme/i.test(nodemailerFromNameRaw) ? nodemailerFromDomain : nodemailerFromNameRaw;
 
     const mailOptions = {
       from: `${nodemailerFromName} <${nodemailerFromEmail}>`,
@@ -1752,6 +1793,8 @@ export const sendPaymentSuccessfulEmail = async (to, data = {}) => {
       return {
         attachments: nm ? [nm] : [],
         mailjetInlineAttachments: mj ? [mj] : [],
+        from: data?.from,
+        fromName: data?.fromName,
       };
     })()
   );
@@ -1788,6 +1831,8 @@ export const sendPaymentDeclinedEmail = async (to, data = {}) => {
       return {
         attachments: nm ? [nm] : [],
         mailjetInlineAttachments: mj ? [mj] : [],
+        from: data?.from,
+        fromName: data?.fromName,
       };
     })()
   );
@@ -1877,6 +1922,8 @@ export const sendPaymentReminderEmail = async (to, data = {}) => {
         'List-Unsubscribe': data?.unsubscribeUrl ? `<${String(data.unsubscribeUrl).trim()}>` : undefined,
         'List-Unsubscribe-Post': data?.unsubscribeUrl ? 'List-Unsubscribe=One-Click' : undefined,
       },
+      from: data?.from,
+      fromName: data?.fromName,
     }
   );
 };
@@ -1916,7 +1963,7 @@ export const sendCustomerInfoEmail = async (to, data = {}) => {
 };
 
 export const sendAffiliateWelcomeEmail = async (to, data = {}) => {
-  const subject = data?.subject || 'Welcome to the Alluvi Affiliate Program';
+  const subject = data?.subject || `Welcome to the ${getStoreDomain(data)} Affiliate Program`;
   return await sendEmail(
     to,
     subject,
@@ -1954,9 +2001,11 @@ export const sendAffiliateRewardNotificationEmail = async (to, data = {}) => {
 // Plain-language subjects + List-Unsubscribe + plain-text alternative all push these
 // emails toward the Primary tab in Gmail. Without a plain-text part, the message
 // looks like marketing-only HTML and is very likely to land in Promotions.
-const NEWSLETTER_UNSUBSCRIBE_MAILTO = `mailto:${env('EMAIL_FROM_EMAIL', 'info@alluvi.org')}?subject=Unsubscribe`;
+const getNewsletterUnsubscribeMailto = (data) => `mailto:${env('EMAIL_FROM_EMAIL', `info@${getStoreDomain(data)}`)}?subject=Unsubscribe`;
 
 export const sendNewsletterEntryEmail = async (to, data = {}) => {
+  const storeDomain = getStoreDomain(data);
+  const storeName = getStoreName(storeDomain, data);
   const productName = (data?.productName && String(data.productName).trim()) || 'Retatrutide 40mg pen';
   // Conversational subject avoids classic promo triggers ("free", "giveaway", "win")
   const subject = data?.subject || `Got your giveaway entry`;
@@ -1972,13 +2021,13 @@ export const sendNewsletterEntryEmail = async (to, data = {}) => {
     ``,
     `Good luck.`,
     ``,
-    `— The Alluvi team`,
-    `https://alluvi.org`,
+    `— The ${storeName} team`,
+    `https://${storeDomain}`,
     ``,
     `--`,
-    `You're receiving this because you entered the Alluvi giveaway at Alluvi usa.`,
+    `You're receiving this because you entered the ${storeName} giveaway at ${storeName}.`,
     `To opt out, reply with "unsubscribe".`,
-    `Alluvi products are for in vitro R&D only.`,
+    `${storeName} products are for in vitro R&D only.`,
   ].join('\n');
 
   return await sendEmail(
@@ -1994,7 +2043,7 @@ export const sendNewsletterEntryEmail = async (to, data = {}) => {
         mailjetInlineAttachments: mj ? [mj] : [],
         text,
         headers: {
-          'List-Unsubscribe': `<${NEWSLETTER_UNSUBSCRIBE_MAILTO}>`,
+          'List-Unsubscribe': `<${getNewsletterUnsubscribeMailto(data)}>`,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
           'X-Entity-Ref-ID': `newsletter-entry-${Date.now()}`,
         },
@@ -2004,11 +2053,13 @@ export const sendNewsletterEntryEmail = async (to, data = {}) => {
 };
 
 export const sendNewsletterWinnerEmail = async (to, data = {}) => {
+  const storeDomain = getStoreDomain(data);
+  const storeName = getStoreName(storeDomain, data);
   const productName = (data?.productName && String(data.productName).trim()) || 'Retatrutide 40mg pen';
   const claimDeadline = (data?.claimDeadline && String(data.claimDeadline).trim()) || '14 days';
-  const claimUrl = (data?.claimUrl && String(data.claimUrl).trim()) || `mailto:${env('EMAIL_FROM_EMAIL', 'info@alluvi.org')}?subject=Giveaway%20winner%20-%20claim%20my%20prize`;
+  const claimUrl = (data?.claimUrl && String(data.claimUrl).trim()) || `mailto:${env('EMAIL_FROM_EMAIL', `info@${storeDomain}`)}?subject=Giveaway%20winner%20-%20claim%20my%20prize`;
   // Conversational subject — avoid emoji/all-caps in subject which classifiers flag as bulk
-  const subject = data?.subject || `Good news about the Alluvi giveaway`;
+  const subject = data?.subject || `Good news about the ${storeName} giveaway`;
 
   const text = [
     `Hi,`,
@@ -2023,11 +2074,11 @@ export const sendNewsletterWinnerEmail = async (to, data = {}) => {
     `Claim link: ${claimUrl}`,
     ``,
     `Cheers,`,
-    `The Alluvi team`,
-    `https://alluvi.org`,
+    `The ${storeName} team`,
+    `https://${storeDomain}`,
     ``,
     `--`,
-    `Alluvi products are for in vitro R&D only. If you didn't enter the`,
+    `${storeName} products are for in vitro R&D only. If you didn't enter the`,
     `giveaway, ignore this email and we'll redraw.`,
   ].join('\n');
 

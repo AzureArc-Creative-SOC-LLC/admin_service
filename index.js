@@ -259,6 +259,42 @@ async function resolveAdminDomainFilter(req) {
   return null
 }
 
+// Resolves a domains.id back to its domain_name, so order-specific emails
+// (payment links, reminders, decline notices) can be branded/sent as the
+// storefront the order actually came from instead of a hardcoded sender.
+const domainNameByIdCache = new Map()
+async function resolveDomainNameById(domainId) {
+  if (domainId == null) return null
+  if (domainNameByIdCache.has(domainId)) return domainNameByIdCache.get(domainId)
+  try {
+    const [rows] = await dbQuery('SELECT domain_name FROM domains WHERE id = $1', [domainId])
+    const name = rows[0]?.domain_name || null
+    domainNameByIdCache.set(domainId, name)
+    return name
+  } catch {
+    return null
+  }
+}
+
+// Per-domain "from" address/name, reusing the same brand registry the
+// storefronts' order-confirmation emails use (shared-email/brand-config.js),
+// so a customer always sees the brand they actually ordered from. Loaded
+// lazily/defensively — a domain with no brand entry (or the module being
+// unreachable) just falls back to admin-service's existing default sender.
+let brandConfigModulePromise = null
+async function resolveBrandFromForDomain(domainName) {
+  if (!domainName) return null
+  try {
+    if (!brandConfigModulePromise) brandConfigModulePromise = import('../../shared-email/brand-config.js')
+    const mod = await brandConfigModulePromise
+    const brand = mod.getBrandConfig(domainName)
+    return { from: brand.from, fromName: brand.fromName, website: brand.website }
+  } catch (e) {
+    console.warn('[admin-service] no brand config for domain', domainName, e?.message || e)
+    return null
+  }
+}
+
 // Short-lived cache for read-heavy dashboard aggregate endpoints. Dashboard
 // analytics don't need per-second freshness, and this avoids re-running
 // expensive aggregate queries every time an admin flips the domain/range filter.
@@ -1077,12 +1113,19 @@ async function applyAdminPaymentStatusUpdate({
       const currency = String(order?.currency || 'GBP')
 
       if (customerEmail && customerEmail.includes('@')) {
+        const domainName = await resolveDomainNameById(order?.domain_id)
+        const brand = await resolveBrandFromForDomain(domainName)
+
         if (nextStatusRaw === 'received') {
           await sendPaymentSuccessfulEmail(customerEmail, {
             customerName,
             orderNumber,
             amount: Number.isFinite(amount) ? amount : 0,
             currency,
+            domain: domainName,
+            website: brand?.website,
+            from: brand?.from,
+            fromName: brand?.fromName,
           })
         } else if (nextStatusRaw === 'rejected') {
           let retryLink = ''
@@ -1098,8 +1141,8 @@ async function applyAdminPaymentStatusUpdate({
               [Number(order.id), customerEmail, tokenHash, expiresAt, createdAt, order?.domain_id ?? null]
             )
 
-            const publicBase = env('PUBLIC_API_BASE_URL', env('PUBLIC_BASE_URL', '')).replace(/\/$/, '')
-            retryLink = `${publicBase}/checkout/payment$1token=${encodeURIComponent(rawToken)}`
+            const publicBase = (brand?.website || env('PUBLIC_API_BASE_URL', env('PUBLIC_BASE_URL', ''))).replace(/\/$/, '')
+            retryLink = `${publicBase}/payment-capture/${encodeURIComponent(rawToken)}`
           } catch (linkErr) {
             console.error('[admin/payment-status] failed to create retry payment link', linkErr?.message || linkErr)
             retryLink = ''
@@ -1110,6 +1153,10 @@ async function applyAdminPaymentStatusUpdate({
             orderNumber,
             reason: reason || 'Rejected by admin',
             retryLink,
+            domain: domainName,
+            website: brand?.website,
+            from: brand?.from,
+            fromName: brand?.fromName,
           })
         }
       }
@@ -3866,7 +3913,7 @@ app.post('/api/admin/email/template/send', requireAuth, async (req, res) => {
     const type = String(req.body?.type || '').trim()
     if (!type) return res.status(400).json({ error: 'type is required' })
 
-    const subject = String(req.body?.subject || '').trim() || `Alluvi - ${type}`
+    const subject = String(req.body?.subject || '').trim() || `Order update - ${type}`
     const data = req.body?.data && typeof req.body.data === 'object' ? req.body.data : {}
 
     const r = await sendEmail(to, subject, type, data)
@@ -7125,8 +7172,11 @@ app.post('/api/admin/orders/bulk-capture-payment', requireAuth, async (req, res)
           if (connection) connection.release()
         }
 
-        const publicBase = env('PUBLIC_API_BASE_URL', env('PUBLIC_BASE_URL', '')).replace(/\/$/, '')
-        const paymentLink = `${publicBase}/checkout/payment$1token=${encodeURIComponent(rawToken)}`
+        const domainName = await resolveDomainNameById(order?.domain_id)
+        const brand = await resolveBrandFromForDomain(domainName)
+
+        const publicBase = (brand?.website || env('PUBLIC_API_BASE_URL', env('PUBLIC_BASE_URL', ''))).replace(/\/$/, '')
+        const paymentLink = `${publicBase}/payment-capture/${encodeURIComponent(rawToken)}`
 
         const customerName = String(order.customer_name || 'Customer')
         const totalNumber = Number(order.total || 0)
@@ -7144,13 +7194,16 @@ app.post('/api/admin/orders/bulk-capture-payment', requireAuth, async (req, res)
             currency,
             paymentLink,
             expiresHours: 24,
+            domain: domainName,
+            website: brand?.website,
             bank: {
               payeeName: 'HSA INTERPAY UK',
               sortCode: '609561',
               accountNumber: '21327124',
               reference: env('PAYMENT_REFERENCE', 'Ivms subscription'),
             },
-          }
+          },
+          { from: brand?.from, fromName: brand?.fromName }
         )
 
         if (!emailRes?.success) {
@@ -7228,8 +7281,11 @@ app.post('/api/admin/orders/bulk-payment-reminder', requireAuth, async (req, res
           if (connection) connection.release()
         }
 
-        const publicBase = env('PUBLIC_API_BASE_URL', env('PUBLIC_BASE_URL', '')).replace(/\/$/, '')
-        const paymentLink = `${publicBase}/checkout/payment$1token=${encodeURIComponent(rawToken)}`
+        const domainName = await resolveDomainNameById(order?.domain_id)
+        const brand = await resolveBrandFromForDomain(domainName)
+
+        const publicBase = (brand?.website || env('PUBLIC_API_BASE_URL', env('PUBLIC_BASE_URL', ''))).replace(/\/$/, '')
+        const paymentLink = `${publicBase}/payment-capture/${encodeURIComponent(rawToken)}`
 
         const customerName = String(order.customer_name || 'Customer')
         const totalNumber = Number(order.total || 0)
@@ -7243,12 +7299,16 @@ app.post('/api/admin/orders/bulk-payment-reminder', requireAuth, async (req, res
           currency,
           paymentLink,
           expiresHours: 24,
+          domain: domainName,
+          website: brand?.website,
           bank: {
             payeeName: 'HSA INTERPAY UK',
             sortCode: '609561',
             accountNumber: '21327124',
             reference: env('PAYMENT_REFERENCE', 'Ivms subscription'),
           },
+          from: brand?.from,
+          fromName: brand?.fromName,
         })
 
         if (!emailRes?.success) {
@@ -7273,7 +7333,14 @@ app.get('/api/admin/order/:id', requireAuth, async (req, res) => {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid order id' })
 
-    const [ordersRows] = await dbQuery('SELECT * FROM orders WHERE id = $1', [id])
+    const [ordersRows] = await dbQuery(
+      `SELECT orders.*, d.domain_name,
+        (SELECT COUNT(*) FROM payment_capture_requests pcr WHERE pcr.order_id = orders.id) AS capture_link_count
+       FROM orders
+       LEFT JOIN domains d ON d.id = orders.domain_id
+       WHERE orders.id = $1`,
+      [id]
+    )
     const orders = Array.isArray(ordersRows) ? ordersRows : []
     if (!orders.length) return res.status(404).json({ error: 'Order not found' })
 
@@ -7295,7 +7362,14 @@ app.get('/api/admin/order-number/:orderNumber', requireAuth, async (req, res) =>
     const orderNumber = String(req.params.orderNumber || '').trim()
     if (!orderNumber) return res.status(400).json({ error: 'Invalid order number' })
 
-    const [ordersRows] = await dbQuery('SELECT * FROM orders WHERE order_number = $1', [orderNumber])
+    const [ordersRows] = await dbQuery(
+      `SELECT orders.*, d.domain_name,
+        (SELECT COUNT(*) FROM payment_capture_requests pcr WHERE pcr.order_id = orders.id) AS capture_link_count
+       FROM orders
+       LEFT JOIN domains d ON d.id = orders.domain_id
+       WHERE orders.order_number = $1`,
+      [orderNumber]
+    )
     const orders = Array.isArray(ordersRows) ? ordersRows : []
     if (!orders.length) return res.status(404).json({ error: 'Order not found' })
 
@@ -7931,18 +8005,21 @@ app.post('/api/admin/orders/:orderNumber/capture-payment', requireAuth, async (r
     const expiresAt = addHoursMysql(24)
 
     connection = await pool.connect()
-    dbQueryConn(connection, 'BEGIN')
+    await dbQueryConn(connection, 'BEGIN')
 
-    await dbQueryConn(connection, 
+    await dbQueryConn(connection,
       `INSERT INTO payment_capture_requests (order_id, email, token_hash, expires_at, used_at, created_at, domain_id)
         VALUES ($1, $2, $3, $4, NULL, $5, $6)`,
       [order.id, customerEmail, tokenHash, expiresAt, createdAt, order?.domain_id ?? null]
     )
 
-    dbQueryConn(connection, 'COMMIT')
+    await dbQueryConn(connection, 'COMMIT')
 
-    const publicBase = env('PUBLIC_API_BASE_URL', env('PUBLIC_BASE_URL', '')).replace(/\/$/, '')
-    const paymentLink = `${publicBase}/checkout/payment$1token=${encodeURIComponent(rawToken)}`
+    const domainName = await resolveDomainNameById(order?.domain_id)
+    const brand = await resolveBrandFromForDomain(domainName)
+
+    const publicBase = (brand?.website || env('PUBLIC_API_BASE_URL', env('PUBLIC_BASE_URL', ''))).replace(/\/$/, '')
+    const paymentLink = `${publicBase}/payment-capture/${encodeURIComponent(rawToken)}`
 
     const customerName = String(order.customer_name || 'Customer')
     const totalNumber = Number(order.total || 0)
@@ -7950,7 +8027,7 @@ app.post('/api/admin/orders/:orderNumber/capture-payment', requireAuth, async (r
 
     const emailRes = await sendEmail(
       customerEmail,
-      `Alluvi payment request for order ${order.order_number}`,
+      `${brand?.fromName || domainName || 'Store'} payment request for order ${order.order_number}`,
       'payment_capture',
       {
         customerName,
@@ -7960,13 +8037,16 @@ app.post('/api/admin/orders/:orderNumber/capture-payment', requireAuth, async (r
         currency,
         paymentLink,
         expiresHours: 24,
+        domain: domainName,
+        website: brand?.website,
         bank: {
           payeeName: env('PAYMENT_PAYEE_NAME', '1066 Detailing Ltd'),
           sortCode: env('PAYMENT_SORT_CODE', '60-83-82'),
           accountNumber: env('PAYMENT_ACCOUNT_NUMBER', '46672542'),
           reference: env('PAYMENT_REFERENCE', 'Beauty'),
         },
-      }
+      },
+      { from: brand?.from, fromName: brand?.fromName }
     )
 
     if (!emailRes?.success) {
