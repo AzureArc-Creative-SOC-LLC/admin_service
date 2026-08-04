@@ -524,46 +524,46 @@ const getEmailTemplate = (type, data) => {
       }
 
       content = `
-        <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background:#1c1c1c; padding: 30px 40px; text-align: center;">
+        <div style="max-width: 650px; margin: 20px auto;  border-radius: 16px; border: 1px solid #d9ece9; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+          <div style="background:#0f766e; padding: 30px 40px; text-align: center;">
             ${headerLogoHtml}
-            <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Payment Successful</p>
+            <p style="font-size: 13px; letter-spacing: 0.5px; color: rgba(255,255,255,0.85); margin: 10px 0 0 0;">Payment Successful</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Your payment is confirmed</h2>
+            <h2 style="font-size: 26px; font-weight: 300; color: #134e4a; margin: 0 0 18px 0; line-height: 1.3;">Your payment is confirmed</h2>
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Hi ${name},</p>
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">${deliveryText}</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 18px 0 22px 0; border-radius: 8px;">
+            <div style="background: #ffffff; border: 1px solid #d9ece9; padding: 22px; margin: 18px 0 22px 0; border-radius: 12px;">
               <div style="font-size: 14px; line-height: 1.7; color: #4a4a4a; margin: 0;">
                 Orders are typically processed within 2 working days. Once your order is dispatched, you will receive a separate email with your tracking details. Please keep an eye on your inbox (and spam/junk folder) for updates.
               </div>
             </div>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #00d4aa; padding: 22px; margin: 22px 0; border-radius: 8px;">
+            <div style="background: #f0f9f7; border: 1px solid #d9ece9; border-left: 3px solid #0f766e; padding: 22px; margin: 22px 0; border-radius: 12px;">
               ${orderNumber ? `
                 <div style="margin-bottom: 12px;">
-                  <div style="font-size: 12px; font-weight: 700; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
-                  <div style="font-size: 18px; font-weight: 900; color: #1a1a1a;">${orderNumber}</div>
+                  <div style="font-size: 12px; font-weight: 700; color: #4a7d77; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
+                  <div style="font-size: 18px; font-weight: 700; color: #134e4a;">${orderNumber}</div>
                 </div>
               ` : ''}
               <div style="margin-bottom: 12px;">
-                <div style="font-size: 12px; font-weight: 700; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Amount</div>
-                <div style="font-size: 20px; font-weight: 900; color: #00b894;">$${Number.isFinite(amount) ? amount.toFixed(2) : '0.00'}</div>
+                <div style="font-size: 12px; font-weight: 700; color: #4a7d77; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Amount</div>
+                <div style="font-size: 20px; font-weight: 700; color: #0f766e;">$${Number.isFinite(amount) ? amount.toFixed(2) : '0.00'}</div>
               </div>
             </div>
 
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 14px 0;">You can track your order status at any time from the Track Order page.</p>
 
             <div style="text-align: center; margin: 22px 0 0; display: flex; flex-direction: column; gap: 12px; align-items: center;">
-              <a href="${trackUrl}" style="display: inline-block; background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Open Track Order</a>
-              <a href="${storeUrl}/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact ${storeName} Support</a>
+              <a href="${trackUrl}" style="display: inline-block; background: #0f766e; color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 600; font-size: 16px;">Open Track Order</a>
+              <a href="${storeUrl}/track-order?openChat=1" style="display: inline-block; background: #134e4a; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 600; font-size: 14px;">Contact ${storeName} Support</a>
             </div>
 
             <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">If you need help, you can message us on Live Chat from the official website <strong>${storeName}</strong>.</p>
           </div>
-          <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+          <div style="background: #0c5f59; color: #ffffff; padding: 40px; text-align: center;">
+            <p style="font-size: 14px; color: #cfe9e5; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
           </div>
         </div>
       `;
@@ -578,40 +578,40 @@ const getEmailTemplate = (type, data) => {
       const website = String(data?.website || storeUrl).trim();
 
       content = `
-        <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 50px 40px; text-align: center;">
-            <h1 style="font-size: 36px; font-weight: 500; color: #ffffff; margin: 0; letter-spacing: -1px;">${storeName.toUpperCase()}</h1>
-            <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Secure Card Payment</p>
+        <div style="max-width: 650px; margin: 20px auto; background: #FAFAF8; border-radius: 16px; border: 1px solid #e4e0d8; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+          <div style="background: #4e493e; padding: 50px 40px; text-align: center;">
+            <h1 style="font-size: 32px; font-weight: 400; color: #ffffff; margin: 0; letter-spacing: -0.5px;">${storeName.toUpperCase()}</h1>
+            <p style="font-size: 13px; letter-spacing: 0.5px; color: rgba(255,255,255,0.75); margin: 10px 0 0 0;">Secure Card Payment</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Complete your payment</h2>
+            <h2 style="font-size: 26px; font-weight: 300; color: #3d392f; margin: 0 0 18px 0; line-height: 1.3;">Complete your payment</h2>
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Hi ${name},</p>
 
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">Your order was created using our secure payment processor.</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 22px 0; border-radius: 8px;">
+            <div style="background: #f0f9f7; border: 1px solid #d9ece9; border-left: 3px solid #0f766e; padding: 22px; margin: 22px 0; border-radius: 12px;">
               ${orderNumber ? `
                 <div style="margin-bottom: 12px;">
-                  <div style="font-size: 12px; font-weight: 700; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
-                  <div style="font-size: 18px; font-weight: 900; color: #1a1a1a;">${orderNumber}</div>
+                  <div style="font-size: 12px; font-weight: 700; color: #6e6a5c; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
+                  <div style="font-size: 18px; font-weight: 700; color: #3d392f;">${orderNumber}</div>
                 </div>
               ` : ''}
               <div>
-                <div style="font-size: 12px; font-weight: 700; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Amount</div>
-                <div style="font-size: 20px; font-weight: 900; color: #2563EB;">$${Number.isFinite(total) ? total.toFixed(2) : '0.00'}</div>
+                <div style="font-size: 12px; font-weight: 700; color: #4a7d77; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Amount</div>
+                <div style="font-size: 20px; font-weight: 700; color: #0f766e;">$${Number.isFinite(total) ? total.toFixed(2) : '0.00'}</div>
               </div>
             </div>
 
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">If your payment was not completed, you can continue from the Track Order page.</p>
 
             <div style="text-align: center; margin: 26px 0;">
-              <a href="${trackUrl}" style="display: inline-block; background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 800; font-size: 16px;">Open Track Order</a>
+              <a href="${trackUrl}" style="display: inline-block; background: #0f766e; color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 600; font-size: 16px;">Open Track Order</a>
             </div>
 
-            <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">Need help? Use Live Chat on <a href="${website}" style="color:#2563EB; text-decoration:none; font-weight:800;">${storeName}</a> for assistance.</p>
+            <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">Need help? Use Live Chat on <a href="${website}" style="color:#0f766e; text-decoration:none; font-weight:700;">${storeName}</a> for assistance.</p>
           </div>
-          <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+          <div style="background: #3d392f; color: #ffffff; padding: 40px; text-align: center;">
+            <p style="font-size: 14px; color: #cfc9ba; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
           </div>
         </div>
       `;
@@ -684,30 +684,30 @@ const getEmailTemplate = (type, data) => {
       const trackUrl = String(data?.trackUrl || `${storeUrl}/track-order`).trim();
 
       content = `
-        <div style="background: #f3f3f3; padding: 24px 14px;">
-          <div style="max-width: 650px; margin: 0 auto; background: #ffffff; border-radius: 12px; box-shadow: 0 6px 22px rgba(0,0,0,0.10); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-            <div style="background: #2563EB; padding: 44px 40px; text-align: center;">
+        <div style="background: #FDF8F0; padding: 24px 14px;">
+          <div style="max-width: 650px; margin: 0 auto; background: #FDF8F0; border-radius: 16px; border: 1px solid #ecddc9; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+            <div style="background: #b3463f; padding: 44px 40px; text-align: center;">
               ${headerLogoHtml}
-              <p style="font-size: 12px; font-style: italic; color: rgba(255,255,255,0.92); margin: 10px 0 0 0;">Payment Rejected</p>
+              <p style="font-size: 12px; letter-spacing: 0.5px; color: rgba(255,255,255,0.85); margin: 10px 0 0 0;">Payment Rejected</p>
             </div>
 
             <div style="padding: 42px 40px 30px 40px;">
-              <h2 style="font-size: 28px; font-weight: 200; color: #111; margin: 0 0 16px 0; line-height: 1.2;">We couldn’t confirm your payment</h2>
+              <h2 style="font-size: 26px; font-weight: 300; color: #6b2620; margin: 0 0 16px 0; line-height: 1.2;">We couldn’t confirm your payment</h2>
               <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0 0 12px 0;">Hi ${name},</p>
 
               <p style="font-size: 13px; line-height: 1.7; color: #666; margin: 0 0 16px 0;">Your payment was not successful with our payment processor.</p>
 
-              <div style="background: #fafafa; border-left: 4px solid #ef4444; padding: 18px 18px; margin: 18px 0; border-radius: 8px;">
+              <div style="background: #F5EBDA; border: 1px solid #ecddc9; border-left: 3px solid #b3463f; padding: 18px 18px; margin: 18px 0; border-radius: 12px;">
                 ${orderNumber ? `
                   <div style="margin-bottom: 10px;">
-                    <div style="font-size: 10px; font-weight: 800; color: #777; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
-                    <div style="font-size: 14px; font-weight: 900; color: #111;">${orderNumber}</div>
+                    <div style="font-size: 10px; font-weight: 800; color: #8a7455; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
+                    <div style="font-size: 14px; font-weight: 700; color: #6b2620;">${orderNumber}</div>
                   </div>
                 ` : ''}
                 ${reason ? `
                   <div>
-                    <div style="font-size: 10px; font-weight: 800; color: #777; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Details</div>
-                    <div style="font-size: 13px; color: #111; line-height: 1.7;">${reason}</div>
+                    <div style="font-size: 10px; font-weight: 800; color: #8a7455; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Details</div>
+                    <div style="font-size: 13px; color: #6b2620; line-height: 1.7;">${reason}</div>
                   </div>
                 ` : ''}
               </div>
@@ -715,15 +715,15 @@ const getEmailTemplate = (type, data) => {
               <p style="font-size: 12px; line-height: 1.7; color: #666; margin: 0 0 18px 0;">You can track your order status and attempt checkout again from the Track Order page.</p>
 
               <div style="text-align: center; margin: 18px 0 22px;">
-                <a href="${trackUrl}" style="display: inline-block; background: #2563EB; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 900; font-size: 13px;">Open Track Order</a>
+                <a href="${trackUrl}" style="display: inline-block; background: #0083c3; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 600; font-size: 13px;">Open Track Order</a>
               </div>
 
               <p style="font-size: 12px; line-height: 1.7; color: #777; margin: 0;">If you did not place this order, you can safely ignore this email.</p>
             </div>
 
-            <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 34px 24px; text-align: center;">
-              <p style="font-size: 11px; color: #aaa; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
-              <p style="font-size: 11px; color: #aaa; margin: 8px 0;">For help, contact us via Live Chat on <a href="${storeUrl}" style="color: #2563EB; text-decoration: none; font-weight: 800;">${storeName}</a>.</p>
+            <div style="background: #8f3a33; color: #ffffff; padding: 34px 24px; text-align: center;">
+              <p style="font-size: 11px; color: #f3d9d6; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+              <p style="font-size: 11px; color: #f3d9d6; margin: 8px 0;">For help, contact us via Live Chat on <a href="${storeUrl}" style="color: #ffffff; text-decoration: none; font-weight: 700;">${storeName}</a>.</p>
             </div>
           </div>
         </div>
@@ -1049,37 +1049,37 @@ const getEmailTemplate = (type, data) => {
 
     case 'payment_capture':
       content = `
-        <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: linear-gradient(135deg, #2d2d2d 0%, #1D4ED8 100%); padding: 20px 40px; text-align: center; color: #ededed">
+        <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; border:1px solid #e3e3e3;box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+          <div style="background: #355872; padding: 20px 40px; text-align: center; color: #ededed">
             ${headerLogoHtml}
             <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Payment Required</p>
           </div>
           <div style="padding: 20px 40px;">
 
-            <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">Hi ${String(data?.customerName || '').trim() || 'there'},</p>
+            <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">Hi ${String(data?.customerName || '').trim() || 'there'},</p>
 
-            <p style="font-size: 16px; color: #4a4a4a; margin: 0 0 16px 0;">You recently placed an order request on ${storeName}. No payment was taken at that time.</p>
-            <p style="font-size: 16px; color: #4a4a4a; margin: 0 0 16px 0;">This email contains your secure link to pay for that order.</p>
+            <p style="font-size: 15px; color: #4a4a4a; margin: 0 0 16px 0;">You recently placed an order request on ${storeName}. No payment was taken at that time.</p>
+            <p style="font-size: 15px; color: #4a4a4a; margin: 0 0 16px 0;">This email contains your secure link to pay for that order.</p>
 
             <p style="font-size: 15px; color: #4a4a4a; margin: 0 0 10px 0;">If you complete payment before 2 pm (Mon to Fri), your order will ship the same day for next day delivery.</p>
             <p style="font-size: 15px; color: #4a4a4a; margin: 0 0 18px 0;">Payments made after 2 pm will ship the next working day.</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 22px 0; border-radius: 8px;">
+            <div style="background: #f8f9fa; border-left: 3px solid #456882; padding: 20px 20px 5px; border-radius: 8px;">
               <div style="margin-bottom: 12px;">
-                <div style="font-size: 12px; font-weight: 600; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
-                <div style="font-size: 18px; font-weight: 800; color: #1a1a1a;">${String(data?.orderNumber || '').trim()}</div>
+                <div style="font-size: 12px; font-weight: 500; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
+                <div style="font-size: 16px; font-weight: 600; color: #1a1a1a;">${String(data?.orderNumber || '').trim()}</div>
               </div>
               <div style="margin-bottom: 12px;">
-                <div style="font-size: 12px; font-weight: 600; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Amount</div>
-                <div style="font-size: 20px; font-weight: 800; color: #2563EB;">$${Number(data?.total || 0).toFixed(2)}</div>
+                <div style="font-size: 12px; font-weight: 500; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Amount</div>
+                <div style="font-size: 18px; font-weight: 600; color: #456882;">$${Number(data?.total || 0).toFixed(2)}</div>
               </div>
             </div>
 
             <div style="text-align: center; margin: 26px 0;">
-              <a href="${String(data?.paymentLink || '').trim()}" style="display: inline-block; background: #1744a9; color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 700; font-size: 16px;">Open Secure Payment Page</a>
+              <a href="${String(data?.paymentLink || '').trim()}" style="display: inline-block; background: #1679AB; color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 500; font-size: 16px;">Open Secure Payment Page</a>
             </div>
 
-            <h3 style="font-size: 18px; font-weight: 800; color: #1a1a1a; margin: 10px 0 12px 0;"><strong>How to complete your payment</strong></h3>
+            <h3 style="font-size: 18px; font-weight: 500; color: #4a4a4a; ">How to complete your payment</h3>
 
             <div style="font-size: 15px; line-height: 1.8; color: #4a4a4a; margin: 0 0 18px 0;">
               <div style="margin: 0 0 8px 0;">Click the secure payment link/Button.</div>
@@ -1088,20 +1088,20 @@ const getEmailTemplate = (type, data) => {
               <div style="margin: 0;">Once we confirm your payment, you will receive another email and your order will move to shipping.</div>
             </div>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 22px 0; border-radius: 8px;">
-              <div style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 12px 0;">
-                If you need help, you can message us on Live Chat on the official website <strong>${storeUrl}</strong>,
-                <br/>or use the button below to contact us via Live Chat.
+            <div style="background: #f8f9fa; border-left: 3px solid #456882; padding: 22px; margin: 22px 0; border-radius: 8px;">
+              <div style="font-size: 14px; line-height: 1.7; color: #4a4a4a; margin: 0 0 12px 0;"> If you need help, you can message us on Live Chat on the official website
+                <span style="color: #353a43;">${storeUrl}</span>,
+                or use the button below to contact us via Live Chat.
               </div>
               <div style="text-align: center; margin: 0;">
-                <a href="${storeUrl}/track-order?openChat=1" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 800; font-size: 14px;">Contact ${storeName} Support</a>
+                <a href="${storeUrl}/track-order?openChat=1" style="display: inline-block; background: #4e5767; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px;  font-size: 14px;">Contact ${storeName} Support</a>
               </div>
             </div>
 
             <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0;">If you did not place this order, you can safely ignore this email.</p>
           </div>
-          <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+          <div style="background: #355872; color: #bdbdbd; padding: 5px; text-align: center;">
+            <p style="font-size: 14px; color: #bdbdbd; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
           </div>
         </div>
       `;
@@ -1110,18 +1110,18 @@ const getEmailTemplate = (type, data) => {
     case 'payment_successful':
       const paymentPublicBase = String(process.env.PUBLIC_BASE_URL || process.env.PUBLIC_API_BASE_URL || storeUrl).replace(/\/$/, '');
       content = `
-        <div style="max-width: 650px; margin: 20px auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-          <div style="background: #1e1e1e; padding: 30px 40px; text-align: center;">
+        <div style="max-width: 650px; margin: 20px auto; border:1px solid #e1e1e1; border-radius: 16px; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+          <div style="background: #0f766e; padding: 20px 40px; text-align: center;">
             ${headerLogoHtml}
-            <p style="font-size: 14px; color: rgba(255,255,255,0.9); margin: 8px 0 0 0;">Payment Successful</p>
+            <p style="font-size: 13px; letter-spacing: 0.5px; color: rgba(255,255,255,0.85); margin: 10px 0 0 0;">Payment Successful</p>
           </div>
           <div style="padding: 50px 40px;">
-            <h2 style="font-size: 28px; font-weight: 200; color: #1a1a1a; margin: 0 0 18px 0; line-height: 1.3;">Your order will now be prepared for shipping!</h2>
+            <h2 style="font-size: 26px; font-weight: 400; color: #353535; margin: 0 0 18px 0; line-height: 1.3;">Your order will now be prepared for shipping!</h2>
             <p style="font-size: 16px; line-height: 1.7; color: #4a4a4a; margin: 0 0 18px 0;">Hi ${String(data?.customerName || '').trim() || 'there'},</p>
 
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 10px 0;">We have successfully verified your payment. Your order will now be prepared for shipping.</p>
 
-            <div style="background: #f8f9fa; border-left: 4px solid #2563EB; padding: 22px; margin: 18px 0 18px 0; border-radius: 8px;">
+            <div style=" border: 1px solid #d9ece9; border-left: 3px solid #0f766e; padding: 22px; margin: 18px 0 18px 0; border-radius: 12px;">
               <div style="font-size: 14px; line-height: 1.7; color: #4a4a4a; margin: 0;">
                 Orders are typically processed within 2 working days. Once your order is dispatched, you will receive a separate email with your tracking details. Please keep an eye on your inbox (and spam/junk folder) for updates.
               </div>
@@ -1132,13 +1132,13 @@ const getEmailTemplate = (type, data) => {
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 22px 0;">You can also check the progress of your order by logging in and going to the Track Orders page. Your tracking number will appear there once the parcel has been shipped.</p>
 
             <div style="text-align: center; margin: 26px 0 0; display: flex; flex-direction: column; gap: 12px; align-items: center;">
-              <a href="${storeUrl}/track-order?order=${data?.orderNumber}" style="display: inline-block; background: #3569d9; color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 500; font-size: 16px; margin-right: 20px;">Track your order</a>
-              <a href="${storeUrl}" style="display: inline-block; background: #111111; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 10px; font-weight: 500; font-size: 14px;">Contact ${storeName} Support</a>
+              <a href="${storeUrl}/track-order?order=${data?.orderNumber}" style="display: inline-block; background: #0f766e; color: #ffffff; text-decoration: none; padding: 14px 26px; border-radius: 10px; font-weight: 600; font-size: 16px; margin-right: 20px;">Track your order</a>
+              <a href="${storeUrl}" style="display: inline-block; background: #444b4a; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 10px; font-weight: 600; font-size: 14px;">Contact ${storeName} Support</a>
             </div>
           </div>
-          <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 40px; text-align: center;">
-            <p style="font-size: 14px; color: #999; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
-            <p style="font-size: 14px; color: #999; margin: 8px 0;">For help, contact us via Live Chat on <a href="${storeUrl}" style="color: #e8eaf0; text-decoration: none;">${storeName}</a>.</p>
+          <div style="background: #0c5f59; color: #ffffff; padding: 5px; text-align: center;">
+            <p style="font-size: 14px; color: #d7d7d7; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+            <p style="font-size: 14px; color:#d7d7d7; margin: 8px 0;">For help, contact us via Live Chat on <a href="${storeUrl}" style="color: #d7d7d7; text-decoration: none;">${storeName}</a>.</p>
           </div>
         </div>
       `;
@@ -1190,44 +1190,44 @@ const getEmailTemplate = (type, data) => {
 
     case 'payment_declined':
       content = `
-        <div style="background: #f3f3f3; padding: 24px 14px;">
-          <div style="max-width: 650px; margin: 0 auto; background: #ffffff; border-radius: 12px; box-shadow: 0 6px 22px rgba(0,0,0,0.10); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-            <div style="background: #282828; padding: 44px 40px; text-align: center;">
+        <div style="background: #ffffff; padding: 24px 14px;">
+          <div style="max-width: 650px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e5e5e5; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+            <div style="background: #393E46; padding: 20px 40px; text-align: center;">
               ${headerLogoHtml}
-              <p style="font-size: 12px; color: rgba(255,255,255,0.92); margin: 10px 0 0 0;">Payment Declined</p>
+              <p style="font-size: 12px; letter-spacing: 0.5px; color: #f0f4f9; margin: 10px 0 0 0;">Payment Declined</p>
             </div>
             <div style="padding: 42px 40px 30px 40px;">
-              <h2 style="font-size: 28px; font-weight: 200; color: #111; margin: 0 0 16px 0; line-height: 1.2;">We couldn’t verify your payment</h2>
-              <p style="font-size: 14px; line-height: 1.7; color: #666; margin: 0 0 12px 0;">Hi ${String(data?.customerName || '').trim() || 'there'},</p>
+              <h2 style="font-size: 26px; font-weight: 400; color: #393e46; margin: 0 0 16px 0; line-height: 1.2;">We couldn’t verify your payment</h2>
+              <p style="font-size: 15px; line-height: 1.7; color: #666; margin: 0 0 12px 0;">Hi ${String(data?.customerName || '').trim() || 'there'},</p>
 
-              <p style="font-size: 13px; line-height: 1.7; color: #666; margin: 0 0 16px 0;">Our automated verification couldn’t confirm your payment. Please upload a clearer payment screenshot and try again.</p>
+              <p style="font-size: 15px; line-height: 1.7; color: #666; margin: 0 0 16px 0;">Our automated verification couldn’t confirm your payment. Please upload a clearer payment screenshot and try again.</p>
 
-              <div style="background: #fafafa; border-left: 4px solid #ef4444; padding: 18px 18px; margin: 18px 0; border-radius: 8px;">
+              <div style="background: #f7f7f7; padding: 18px 18px; margin: 18px 0; border-radius: 12px;">
                 ${data?.orderNumber ? `
                   <div style="margin-bottom: 10px;">
-                    <div style="font-size: 10px; font-weight: 800; color: #777; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
-                    <div style="font-size: 14px; font-weight: 900; color: #111;">${data.orderNumber}</div>
+                    <div style="font-size: 10px; font-weight: 500; color: #738598;  text-transform: uppercase; letter-spacing: 1px;">Order Number</div>
+                    <div style="font-size: 14px; font-weight: 700; color: #393e46;">${data.orderNumber}</div>
                   </div>
                 ` : ''}
                 ${data?.reason ? `
                   <div>
-                    <div style="font-size: 10px; font-weight: 800; color: #777; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 1px;">Details</div>
-                    <div style="font-size: 13px; color: #111; line-height: 1.7;">${data.reason}</div>
+                    <div style="font-size: 10px; font-weight: 500; color: #738598; text-transform: uppercase; letter-spacing: 1px;">Details</div>
+                    <div style="font-size: 13px; color: #6b2620; line-height: 1.7;">${data.reason}</div>
                   </div>
                 ` : ''}
               </div>
 
               ${data?.retryLink ? `
                 <div style="text-align: center; margin: 18px 0 22px;">
-                  <a href="${data.retryLink}" style="display: inline-block; background: #1040a9; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 500; font-size: 13px;">Try Payment Again</a>
+                  <a href="${data.retryLink}" style="display: inline-block; background: #2980B9; color: #ffffff; text-decoration: none; padding: 12px 22px; border-radius: 10px; font-weight: 600; font-size: 13px;">Try Payment Again</a>
                 </div>
               ` : ''}
 
               <p style="font-size: 12px; line-height: 1.7; color: #777; margin: 0;">If you did not place this order, you can safely ignore this email.</p>
             </div>
-            <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #ffffff; padding: 34px 24px; text-align: center;">
-              <p style="font-size: 11px; color: #aaa; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
-              <p style="font-size: 11px; color: #aaa; margin: 8px 0;">For help, contact us via Live Chat on <a href="${storeUrl}" style="color: #f6f7f8; text-decoration: none; font-weight: 800;">${storeName}</a>.</p>
+            <div style="background: #393E46; color: #ffffff; padding: 5px 24px; text-align: center;">
+              <p style="font-size: 12px; color: #b7b7b7; margin: 8px 0;"> ${new Date().getFullYear()} ${storeName}. All rights reserved.</p>
+              <p style="font-size: 12px; color: #b7b7b7; margin: 0px 8px 5px;">For help, contact us via Live Chat on <a href="${storeUrl}" style="color: #b7b7b7; text-decoration: none; font-weight: 700;">${storeName}</a>.</p>
             </div>
           </div>
         </div>
@@ -1388,7 +1388,7 @@ const getEmailTemplate = (type, data) => {
       const trackUrl = String(data?.trackUrl || `${storeUrl}/track-order`).trim();
 
       content = `
-        <div style="background: #f3f3f3; padding: 24px 14px;">
+        <div style="padding: 24px 14px;">
           <div style="max-width: 650px; margin: 0 auto; background: #ffffff; border-radius: 12px; box-shadow: 0 6px 22px rgba(0,0,0,0.10); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
             <div style="background: #2563EB; padding: 44px 40px; text-align: center;">
               ${headerLogoHtml}
@@ -1590,19 +1590,17 @@ const getEmailTemplate = (type, data) => {
   }
 
   try {
-    const hasShell = /background:\s*#f3f3f3/i.test(content);
-    if (!hasShell) {
-      content = `<div style="background: #f3f3f3; padding: 24px 14px;">${content}</div>`;
-    }
+  // Always wrap content with standard layout padding
+  content = `<div style="padding: 24px 14px;">${content}</div>`;
 
-    content = content
-      .replace(/background:\s*linear-gradient\(135deg,\s*#2563EB\s*0%,\s*#1D4ED8\s*100%\)/gi, 'background: #2563EB')
-      .replace(/background:\s*linear-gradient\(135deg,\s*#2563eb\s*0%,\s*#1d4ed8\s*100%\)/gi, 'background: #2563EB');
-  } catch {
-    // ignore
-  }
+  content = content
+    .replace(/background:\s*linear-gradient\(135deg,\s*#2563EB\s*0%,\s*#1D4ED8\s*100%\)/gi, 'background: #2563EB')
+    .replace(/background:\s*linear-gradient\(135deg,\s*#2563eb\s*0%,\s*#1d4ed8\s*100%\)/gi, 'background: #2563EB');
+} catch {
+  // ignore
+}
 
-  return content;
+return content;
 };
 
 // Send email function
