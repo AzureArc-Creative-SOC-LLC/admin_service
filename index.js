@@ -391,9 +391,23 @@ app.get('/api/admin/dashboard/summary', requireAuth, async (req, res) => {
     let linksDomainClause = ''
     if (domainId != null) { linksParams.push(domainId); linksDomainClause = `AND domain_id = $${linksParams.length}` }
 
+    const affiliatesParams = []
+    let affiliatesDomainClause = ''
+    if (domainId != null) { affiliatesParams.push(domainId); affiliatesDomainClause = `WHERE a.domain_id = $${affiliatesParams.length}` }
+
+    const wholesaleParams = []
+    let wholesaleDomainClause = ''
+    if (domainId != null) { wholesaleParams.push(domainId); wholesaleDomainClause = `WHERE domain_id = $${wholesaleParams.length}` }
+
+    // The affiliate and wholesale tables are provisioned lazily elsewhere , so a missing
+    // table must not take down the whole summary — most of the dashboard depends
+    // on it. Each of these degrades to a neutral value on its own.
+    const safe = (promise, fallback) => promise.then((r) => r, () => fallback)
+
     const [
       [todayRows], [weekRows], [monthRows], [aovRows], [customerRows], [orderStatusRows],
       [successRows], [failedRows], [refundRows], [outstandingRows], [pendingLinksRows], [inventoryRows],
+      [returningRows], [recentCustomerRows], [affiliatesRows], [wholesaleRows],
     ] = await Promise.all([
       dbQuery(
         `SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE created_at >= CURRENT_DATE ${ordersDomainClause}`,
@@ -468,6 +482,67 @@ app.get('/api/admin/dashboard/summary', requireAuth, async (req, res) => {
            COUNT(*) FILTER (WHERE in_stock::text IN ('0','false','f') OR stock_qty = 0) AS out_of_stock_products
          FROM products`
       ),
+      // Customers with more than one order. The dashboard used to derive this by
+      // downloading 500 customer rows and filtering in JS, which silently capped
+      // the figure at 500; counted in SQL there is no cap.
+      dbQuery(
+        `SELECT COUNT(*) AS returning_customers
+         FROM (
+           SELECT 1
+           FROM orders
+           WHERE customer_email IS NOT NULL AND TRIM(customer_email) <> '' ${ordersDomainClause}
+           GROUP BY LOWER(TRIM(customer_email))
+           HAVING COUNT(*) > 1
+         ) c`,
+        ordersDomainParams
+      ),
+      // The six most recently active customers — the only place the dashboard
+      // needed real rows rather than a total.
+      dbQuery(
+        `SELECT
+           LOWER(TRIM(customer_email)) AS email,
+           MAX(NULLIF(TRIM(customer_name), '')) AS customer_name,
+           COUNT(*) AS orders_count,
+           MAX(created_at) AS last_order_created_at
+         FROM orders
+         WHERE customer_email IS NOT NULL
+           AND TRIM(customer_email) <> ''
+           AND POSITION('@' IN customer_email) > 0 ${ordersDomainClause}
+         GROUP BY LOWER(TRIM(customer_email))
+         ORDER BY MAX(created_at) DESC
+         LIMIT 6`,
+        ordersDomainParams
+      ),
+      // Mirrors the joins /api/admin/affiliates uses for these four figures: the
+      // inner join to users decides which affiliates count, and the redemption
+      // rollup is deliberately not domain-scoped there either.
+      safe(dbQuery(
+        `SELECT
+           COUNT(*) AS total,
+           COUNT(*) FILTER (WHERE a.status = 'approved') AS active,
+           COALESCE(SUM(COALESCE(r.total_earned, 0)), 0) AS rewards_paid,
+           COALESCE(SUM(COALESCE(r.redemption_count, 0)), 0) AS promo_redemptions
+         FROM affiliates a
+         JOIN users u ON u.id = a.user_id
+         LEFT JOIN (
+           SELECT affiliate_user_id,
+                  COUNT(*)           AS redemption_count,
+                  SUM(reward_amount) AS total_earned
+           FROM promo_redemptions
+           GROUP BY affiliate_user_id
+         ) r ON r.affiliate_user_id = a.user_id
+         ${affiliatesDomainClause}`,
+        affiliatesParams
+      ), [[{}]]),
+      safe(dbQuery(
+        `SELECT
+           COUNT(*) AS orders,
+           COUNT(DISTINCT LOWER(TRIM(email))) FILTER (WHERE email IS NOT NULL AND TRIM(email) <> '') AS customers,
+           COALESCE(SUM(COALESCE(grand_total, 0)), 0) AS revenue
+         FROM wholesale_orders
+         ${wholesaleDomainClause}`,
+        wholesaleParams
+      ), [[{}]]),
     ])
 
     const row0 = (rows) => (Array.isArray(rows) && rows[0]) ? rows[0] : {}
@@ -478,6 +553,8 @@ app.get('/api/admin/dashboard/summary', requireAuth, async (req, res) => {
     const cust = row0(customerRows)
     const ord = row0(orderStatusRows)
     const inv = row0(inventoryRows)
+    const aff = row0(affiliatesRows)
+    const whl = row0(wholesaleRows)
 
     const payload = {
       sales: {
@@ -490,6 +567,7 @@ app.get('/api/admin/dashboard/summary', requireAuth, async (req, res) => {
         avgOrderValue: Number(aov.avg_order_value || 0),
         totalCustomers: Number(cust.total_customers || 0),
         newCustomers30d: Number(cust.new_customers_30d || 0),
+        returningCustomers: Number(row0(returningRows).returning_customers || 0),
       },
       orders: {
         newToday: Number(ord.new_today || 0),
@@ -516,6 +594,23 @@ app.get('/api/admin/dashboard/summary', requireAuth, async (req, res) => {
         outOfStockProducts: Number(inv.out_of_stock_products || 0),
         lowStockThreshold: LOW_STOCK_THRESHOLD,
       },
+      affiliates: {
+        total: Number(aff.total || 0),
+        active: Number(aff.active || 0),
+        rewardsPaid: Number(aff.rewards_paid || 0),
+        promoRedemptions: Number(aff.promo_redemptions || 0),
+      },
+      wholesale: {
+        orders: Number(whl.orders || 0),
+        customers: Number(whl.customers || 0),
+        revenue: Number(whl.revenue || 0),
+      },
+      recentCustomers: (Array.isArray(recentCustomerRows) ? recentCustomerRows : []).map((r) => ({
+        email: String(r?.email || '').trim(),
+        customer_name: String(r?.customer_name || '').trim(),
+        orders_count: Number(r?.orders_count || 0),
+        last_order_created_at: r?.last_order_created_at ?? null,
+      })),
     }
     setCachedDashboard(cacheKey, payload)
     return res.json(payload)
