@@ -11,6 +11,7 @@ import multer from 'multer'
 import { fileURLToPath } from 'url'
 import { buildHasInvoiceMaskedItems, buildIbalticxMaskedItems, sendCustomerInfoEmail, sendEmail, sendHasInvoiceEmail, sendIbalticxEmail, sendNewsletterWinnerEmail, sendOutForDeliveryEmail, sendPaymentDeclinedEmail, sendPaymentReminderEmail, sendPaymentSuccessfulEmail, sendRefundInitiatedEmail } from './emailService.js'
 import { createDomainMiddleware } from './domainMiddleware.js'
+import { registerAssistant } from './assistant/index.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -2139,6 +2140,9 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized - Invalid token' })
   }
 }
+
+// AI assistant routes (POST /api/admin/assistant/chat). Kept in ./assistant/ to
+registerAssistant(app, { requireAuth, dbQuery, resolveAdminDomainFilter, resolveDomainNameById })
 
 
 
@@ -5549,51 +5553,12 @@ app.get('/api/admin/stats', requireAuth, async (req, res) => {
     const domainLinksWhere = domainId != null ? 'AND domain_id = $1' : ''
     const domainLinksParams = domainId != null ? [domainId] : []
 
-    const [ordersRows] = await dbQuery(
-      `SELECT COUNT(*) as count, COALESCE(SUM(total),0) as revenue FROM orders WHERE 1=1 ${domainOrdersWhere}`,
-      domainOrdersParams
-    )
-    const [pendingRows] = await dbQuery(
-      `SELECT COUNT(*) as count FROM orders WHERE status = 'pending' ${domainOrdersWhere}`,
-      domainOrdersParams
-    )
-    const [completedRows] = await dbQuery(
-      `SELECT COUNT(*) as count FROM orders WHERE (status IN ('delivered','completed') OR payment_status = 'paid') ${domainOrdersWhere}`,
-      domainOrdersParams
-    )
-
-    const [pendingPaymentsRows] = await dbQuery(
-      `SELECT COALESCE(SUM(total),0) as amount FROM orders WHERE LOWER(payment_status) IN ('pending','unpaid') ${domainOrdersWhere}`,
-      domainOrdersParams
-    )
-    const [completedPaymentsRows] = await dbQuery(
-      `SELECT COALESCE(SUM(total),0) as amount FROM orders WHERE LOWER(payment_status) = 'received' ${domainOrdersWhere}`,
-      domainOrdersParams
-    )
-
-    const [paymentLinks1hRows] = await dbQuery(
-      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '1 hour') ${domainLinksWhere}`,
-      domainLinksParams
-    )
-    const [paymentLinks12hRows] = await dbQuery(
-      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '12 hours') ${domainLinksWhere}`,
-      domainLinksParams
-    )
-    const [paymentLinks24hRows] = await dbQuery(
-      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '24 hours') ${domainLinksWhere}`,
-      domainLinksParams
-    )
-
-    const [paymentLinks7dRows] = await dbQuery(
-      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE created_at >= (NOW() - INTERVAL '7 days') ${domainLinksWhere}`,
-      domainLinksParams
-    )
-
-    const [paymentLinksTotalRows] = await dbQuery(
-      `SELECT COUNT(*) as count FROM payment_capture_requests WHERE 1=1 ${domainLinksWhere}`,
-      domainLinksParams
-    )
-
+    // This endpoint reports ~45 counters that are all derived from four tables.
+    // Asking for them one counter at a time cost 28 database round trips (~2.7s
+    // against the remote pooler) to do a few milliseconds of actual work, so
+    // they're grouped here into five statements: aggregates that share a table
+    // and a WHERE clause are computed together with COUNT/SUM ... FILTER, which
+    // also means each table is scanned once instead of once per counter.
     const sinceRaw = req.query?.since
     const since = sinceRaw ? new Date(String(sinceRaw)) : null
     const sinceDate = since && Number.isFinite(since.getTime()) ? since : null
@@ -5612,121 +5577,123 @@ app.get('/api/admin/stats', requireAuth, async (req, res) => {
 
     const receivedPlaceholders = receivedStatuses.map((_, i) => '$' + (i + 1)).join(',')
 
-    const paymentDateExpr = `COALESCE(
-      (
-        SELECT COALESCE(p.updated_at, p.created_at)
-        FROM payments p
-        WHERE p.order_id = orders.id
-          AND LOWER(COALESCE(p.status,'')) IN (${receivedStatuses.map((_, i) => '$' + (i + 1)).join(',')})
-        ORDER BY COALESCE(p.updated_at, p.created_at) DESC
-        LIMIT 1
-      ),
-      orders.updated_at,
-      orders.created_at
-    )`
-
-    const submittedDateExpr = `COALESCE(orders.submitted_at, orders.reserved_at, orders.created_at)`
-
-    const receivedWindowSql = (intervalExpr) => `
+    // 1. Order counts and revenue — one pass over `orders`.
+    const ordersAggSql = `
       SELECT
-        COUNT(*) AS count,
-        COALESCE(SUM(COALESCE(total, 0)), 0) AS amount
+        COUNT(*) AS total_count,
+        COALESCE(SUM(total),0) AS total_revenue,
+        COUNT(*) FILTER (WHERE status = 'pending') AS pending_count,
+        COUNT(*) FILTER (WHERE status IN ('delivered','completed') OR payment_status = 'paid') AS completed_count,
+        COALESCE(SUM(total) FILTER (WHERE LOWER(payment_status) IN ('pending','unpaid')),0) AS pending_payments_amount,
+        COALESCE(SUM(total) FILTER (WHERE LOWER(payment_status) = 'received'),0) AS completed_payments_amount
       FROM orders
-      WHERE LOWER(COALESCE(payment_status,'')) IN (${receivedPlaceholders})
-        AND ${paymentDateExpr} >= (NOW() - INTERVAL '${intervalExpr}')
+      WHERE 1=1 ${domainOrdersWhere}
     `
 
-    const receivedAllTimeSql = `
+    // 2. Payment-link counts — all five windows in one pass.
+    const linksAggSql = `
       SELECT
-        COUNT(*) AS count,
-        COALESCE(SUM(COALESCE(total, 0)), 0) AS amount
-      FROM orders
-      WHERE LOWER(COALESCE(payment_status,'')) IN (${receivedPlaceholders})
+        COUNT(*) AS total_count,
+        COUNT(*) FILTER (WHERE created_at >= (NOW() - INTERVAL '1 hour')) AS c1h,
+        COUNT(*) FILTER (WHERE created_at >= (NOW() - INTERVAL '12 hours')) AS c12h,
+        COUNT(*) FILTER (WHERE created_at >= (NOW() - INTERVAL '24 hours')) AS c24h,
+        COUNT(*) FILTER (WHERE created_at >= (NOW() - INTERVAL '7 days')) AS c7d
+      FROM payment_capture_requests
+      WHERE 1=1 ${domainLinksWhere}
     `
 
-    const receivedAllTimeParams = receivedStatuses
-    const receivedWindowParams = receivedStatuses
-
-    const [receivedAllTimeRows] = await dbQuery(receivedAllTimeSql, receivedAllTimeParams)
-    const [received24hRows] = await dbQuery(receivedWindowSql('24 hours'), receivedWindowParams)
-    const [received48hRows] = await dbQuery(receivedWindowSql('48 hours'), receivedWindowParams)
-    const [received7dRows] = await dbQuery(receivedWindowSql('7 days'), receivedWindowParams)
-    const [received30dRows] = await dbQuery(receivedWindowSql('30 days'), receivedWindowParams)
-
-    const ivmsBaseSql = `SELECT COUNT(*) as count, COALESCE(SUM(total),0) as amount
-       FROM orders
-       WHERE LOWER(COALESCE(payment_status,'')) IN (${receivedStatuses.map((_, i) => '$' + (i + 1)).join(',')})
-         AND LOWER(COALESCE(bank_account_used,'')) = 'ivms'`
-    const ivmsSql = sinceDate ? `${ivmsBaseSql} AND ${paymentDateExpr} >= $10` : ivmsBaseSql
-    const ivmsParams = sinceDate
-      ? [...receivedStatuses, sinceDate]
-      : receivedStatuses
-    const [ivmsPaidRows] = await dbQuery(ivmsSql, ivmsParams)
-
-    const ibSql = `SELECT COUNT(*) as count, COALESCE(SUM(total),0) as amount
-       FROM orders
-       WHERE LOWER(COALESCE(payment_status,'')) IN (${receivedStatuses.map((_, i) => '$' + (i + 1)).join(',')})
-         AND LOWER(COALESCE(bank_account_used,'')) = 'ibalticx'`
-    const [ibPaidRows] = await dbQuery(ibSql, receivedStatuses)
-
-    const row0 = (rows) => (Array.isArray(rows) && rows[0] ? rows[0] : {})
-    const receivedAllTime = row0(receivedAllTimeRows)
-    const received24h = row0(received24hRows)
-    const received48h = row0(received48hRows)
-    const received7d = row0(received7dRows)
-    const received30d = row0(received30dRows)
-    const klymeSql = `
+    // 3. Received-payment windows plus the two bank_account_used splits.
+    // The payment date is a correlated subquery over `payments`; hoisting it into
+    // a subselect evaluates it once per order rather than once per order *per
+    // counter*, which is what made the seven separate versions of this expensive.
+    const ivmsSinceFilter = sinceDate ? `AND pd >= $${receivedStatuses.length + 1}` : ''
+    const receivedAggSql = `
       SELECT
-        COUNT(*) AS count,
-        COALESCE(SUM(COALESCE(p.amount, o.total, 0)), 0) AS amount
+        COUNT(*) AS all_count,
+        COALESCE(SUM(COALESCE(total,0)),0) AS all_amount,
+        COUNT(*) FILTER (WHERE pd >= (NOW() - INTERVAL '24 hours')) AS c24h,
+        COALESCE(SUM(COALESCE(total,0)) FILTER (WHERE pd >= (NOW() - INTERVAL '24 hours')),0) AS a24h,
+        COUNT(*) FILTER (WHERE pd >= (NOW() - INTERVAL '48 hours')) AS c48h,
+        COALESCE(SUM(COALESCE(total,0)) FILTER (WHERE pd >= (NOW() - INTERVAL '48 hours')),0) AS a48h,
+        COUNT(*) FILTER (WHERE pd >= (NOW() - INTERVAL '7 days')) AS c7d,
+        COALESCE(SUM(COALESCE(total,0)) FILTER (WHERE pd >= (NOW() - INTERVAL '7 days')),0) AS a7d,
+        COUNT(*) FILTER (WHERE pd >= (NOW() - INTERVAL '30 days')) AS c30d,
+        COALESCE(SUM(COALESCE(total,0)) FILTER (WHERE pd >= (NOW() - INTERVAL '30 days')),0) AS a30d,
+        COUNT(*) FILTER (WHERE bank = 'ivms' ${ivmsSinceFilter}) AS ivms_count,
+        COALESCE(SUM(total) FILTER (WHERE bank = 'ivms' ${ivmsSinceFilter}),0) AS ivms_amount,
+        COUNT(*) FILTER (WHERE bank = 'ibalticx') AS ib_count,
+        COALESCE(SUM(total) FILTER (WHERE bank = 'ibalticx'),0) AS ib_amount
+      FROM (
+        SELECT
+          orders.total AS total,
+          LOWER(COALESCE(orders.bank_account_used,'')) AS bank,
+          COALESCE(
+            (
+              SELECT COALESCE(p.updated_at, p.created_at)
+              FROM payments p
+              WHERE p.order_id = orders.id
+                AND LOWER(COALESCE(p.status,'')) IN (${receivedPlaceholders})
+              ORDER BY COALESCE(p.updated_at, p.created_at) DESC
+              LIMIT 1
+            ),
+            orders.updated_at,
+            orders.created_at
+          ) AS pd
+        FROM orders
+        WHERE LOWER(COALESCE(payment_status,'')) IN (${receivedPlaceholders})
+      ) x
+    `
+    const receivedAggParams = sinceDate ? [...receivedStatuses, sinceDate] : receivedStatuses
+
+    // 4. Klyme and AabanPay totals + windows. Previously eight near-identical
+    // queries differing only in the provider literal and the time window; the
+    // provider is now a GROUP BY key and the windows are FILTER clauses.
+    // `latest` picks each order's most recent successful payment per provider,
+    // matching the original per-provider subquery exactly.
+    const providerAggSql = `
+      SELECT
+        latest.provider AS provider,
+        COUNT(*) AS all_count,
+        COALESCE(SUM(COALESCE(p.amount, o.total, 0)),0) AS all_amount,
+        COUNT(*) FILTER (WHERE latest.paid_at >= (NOW() - INTERVAL '1 hour')) AS c1h,
+        COALESCE(SUM(COALESCE(p.amount, o.total, 0)) FILTER (WHERE latest.paid_at >= (NOW() - INTERVAL '1 hour')),0) AS a1h,
+        COUNT(*) FILTER (WHERE latest.paid_at >= (NOW() - INTERVAL '12 hours')) AS c12h,
+        COALESCE(SUM(COALESCE(p.amount, o.total, 0)) FILTER (WHERE latest.paid_at >= (NOW() - INTERVAL '12 hours')),0) AS a12h,
+        COUNT(*) FILTER (WHERE latest.paid_at >= (NOW() - INTERVAL '24 hours')) AS c24h,
+        COALESCE(SUM(COALESCE(p.amount, o.total, 0)) FILTER (WHERE latest.paid_at >= (NOW() - INTERVAL '24 hours')),0) AS a24h,
+        COUNT(*) FILTER (WHERE latest.paid_at >= (NOW() - INTERVAL '48 hours')) AS c48h,
+        COALESCE(SUM(COALESCE(p.amount, o.total, 0)) FILTER (WHERE latest.paid_at >= (NOW() - INTERVAL '48 hours')),0) AS a48h
       FROM orders o
       INNER JOIN (
-        SELECT order_id, MAX(COALESCE(updated_at, created_at)) AS paid_at
+        SELECT
+          order_id,
+          LOWER(COALESCE(provider,'')) AS provider,
+          MAX(COALESCE(updated_at, created_at)) AS paid_at
         FROM payments
-        WHERE LOWER(COALESCE(provider,'')) = 'klyme'
+        WHERE LOWER(COALESCE(provider,'')) IN ('klyme','aabanpay')
           AND LOWER(COALESCE(status,'')) IN (${receivedPlaceholders})
-        GROUP BY order_id
+        GROUP BY order_id, LOWER(COALESCE(provider,''))
       ) latest
         ON latest.order_id = o.id
       INNER JOIN payments p
         ON p.order_id = latest.order_id
        AND COALESCE(p.updated_at, p.created_at) = latest.paid_at
-       AND LOWER(COALESCE(p.provider,'')) = 'klyme'
+       AND LOWER(COALESCE(p.provider,'')) = latest.provider
        AND LOWER(COALESCE(p.status,'')) IN (${receivedPlaceholders})
+      GROUP BY latest.provider
     `
-    const [klymePaidRows] = await dbQuery(klymeSql, receivedStatuses)
 
-    const aabanpaySql = `
-      SELECT
-        COUNT(*) AS count,
-        COALESCE(SUM(COALESCE(p.amount, o.total, 0)), 0) AS amount
-      FROM orders o
-      INNER JOIN (
-        SELECT order_id, MAX(COALESCE(updated_at, created_at)) AS paid_at
-        FROM payments
-        WHERE LOWER(COALESCE(provider,'')) = 'aabanpay'
-          AND LOWER(COALESCE(status,'')) IN (${receivedPlaceholders})
-        GROUP BY order_id
-      ) latest
-        ON latest.order_id = o.id
-      INNER JOIN payments p
-        ON p.order_id = latest.order_id
-       AND COALESCE(p.updated_at, p.created_at) = latest.paid_at
-       AND LOWER(COALESCE(p.provider,'')) = 'aabanpay'
-       AND LOWER(COALESCE(p.status,'')) IN (${receivedPlaceholders})
-    `
-    const [aabanpayPaidRows] = await dbQuery(aabanpaySql, receivedStatuses)
-
-    // Fallback: some environments update orders.payment_processor and/or orders.bank_account_used
-    // but may not have a consistent payments.provider/status row.
-    let aabanpayFallbackRows = [[]]
-    const hasProcessorCol = ORDERS_HAS_PAYMENT_PROCESSOR_COL === true
-    const hasBankCol = ORDERS_HAS_BANK_ACCOUNT_USED_COL === true
+    // 5. Fallback: some environments update orders.payment_processor and/or
+    // orders.bank_account_used but may not have a consistent
+    // payments.provider/status row. Kept as a thunk so its try/catch — and the
+    // one-shot column-support flags it flips — still work inside the batch.
     const fallbackParts = []
-    if (hasProcessorCol) fallbackParts.push("LOWER(COALESCE(payment_processor,'')) = 'aabanpay'")
-    if (hasBankCol) fallbackParts.push("LOWER(COALESCE(bank_account_used,'')) = 'aabanpay'")
+    if (ORDERS_HAS_PAYMENT_PROCESSOR_COL === true) fallbackParts.push("LOWER(COALESCE(payment_processor,'')) = 'aabanpay'")
+    if (ORDERS_HAS_BANK_ACCOUNT_USED_COL === true) fallbackParts.push("LOWER(COALESCE(bank_account_used,'')) = 'aabanpay'")
 
-    if (fallbackParts.length) {
+    const aabanpayFallbackQuery = async () => {
+      if (!fallbackParts.length) return [[{ count: 0, amount: 0 }]]
+
       const aabanpayOrderFallbackSql = `
         SELECT
           COUNT(*) AS count,
@@ -5737,7 +5704,7 @@ app.get('/api/admin/stats', requireAuth, async (req, res) => {
       `
 
       try {
-        ;[aabanpayFallbackRows] = await dbQuery(aabanpayOrderFallbackSql, receivedStatuses)
+        return await dbQuery(aabanpayOrderFallbackSql, receivedStatuses)
       } catch (e) {
         // Avoid log spam: only log once per process.
         if (ORDERS_HAS_PAYMENT_PROCESSOR_COL !== false || ORDERS_HAS_BANK_ACCOUNT_USED_COL !== false) {
@@ -5745,138 +5712,84 @@ app.get('/api/admin/stats', requireAuth, async (req, res) => {
         }
         ORDERS_HAS_PAYMENT_PROCESSOR_COL = false
         ORDERS_HAS_BANK_ACCOUNT_USED_COL = false
-        aabanpayFallbackRows = [[{ count: 0, amount: 0 }]]
+        return [[{ count: 0, amount: 0 }]]
       }
-    } else {
-      aabanpayFallbackRows = [[{ count: 0, amount: 0 }]]
     }
 
-    const klymeWindowSql = (intervalExpr) => `
-      SELECT
-        COUNT(*) AS count,
-        COALESCE(SUM(COALESCE(p.amount, o.total, 0)), 0) AS amount
-      FROM orders o
-      INNER JOIN (
-        SELECT order_id, MAX(COALESCE(updated_at, created_at)) AS paid_at
-        FROM payments
-        WHERE LOWER(COALESCE(provider,'')) = 'klyme'
-          AND LOWER(COALESCE(status,'')) IN (${receivedPlaceholders})
-        GROUP BY order_id
-      ) latest
-        ON latest.order_id = o.id
-      INNER JOIN payments p
-        ON p.order_id = latest.order_id
-       AND COALESCE(p.updated_at, p.created_at) = latest.paid_at
-       AND LOWER(COALESCE(p.provider,'')) = 'klyme'
-       AND LOWER(COALESCE(p.status,'')) IN (${receivedPlaceholders})
-      WHERE latest.paid_at >= (NOW() - INTERVAL '${intervalExpr}')
-    `
+    const [
+      [ordersAggRows],
+      [linksAggRows],
+      [receivedAggRows],
+      [providerAggRows],
+      [aabanpayFallbackRows],
+    ] = await Promise.all([
+      dbQuery(ordersAggSql, domainOrdersParams),
+      dbQuery(linksAggSql, domainLinksParams),
+      dbQuery(receivedAggSql, receivedAggParams),
+      dbQuery(providerAggSql, receivedStatuses),
+      aabanpayFallbackQuery(),
+    ])
 
-    const klymeWindowParams = receivedStatuses
-    const [klyme1hRows] = await dbQuery(klymeWindowSql('1 hour'), klymeWindowParams)
-    const [klyme12hRows] = await dbQuery(klymeWindowSql('12 hours'), klymeWindowParams)
-    const [klyme24hRows] = await dbQuery(klymeWindowSql('24 hours'), klymeWindowParams)
-    const [klyme48hRows] = await dbQuery(klymeWindowSql('48 hours'), klymeWindowParams)
-
-    const aabanpayWindowSql = (intervalExpr) => `
-      SELECT
-        COUNT(*) AS count,
-        COALESCE(SUM(COALESCE(p.amount, o.total, 0)), 0) AS amount
-      FROM orders o
-      INNER JOIN (
-        SELECT order_id, MAX(COALESCE(updated_at, created_at)) AS paid_at
-        FROM payments
-        WHERE LOWER(COALESCE(provider,'')) = 'aabanpay'
-          AND LOWER(COALESCE(status,'')) IN (${receivedPlaceholders})
-        GROUP BY order_id
-      ) latest
-        ON latest.order_id = o.id
-      INNER JOIN payments p
-        ON p.order_id = latest.order_id
-       AND COALESCE(p.updated_at, p.created_at) = latest.paid_at
-       AND LOWER(COALESCE(p.provider,'')) = 'aabanpay'
-       AND LOWER(COALESCE(p.status,'')) IN (${receivedPlaceholders})
-      WHERE latest.paid_at >= (NOW() - INTERVAL '${intervalExpr}')
-    `
-
-    const aabanpayWindowParams = receivedStatuses
-    const [aabanpay1hRows] = await dbQuery(aabanpayWindowSql('1 hour'), aabanpayWindowParams)
-    const [aabanpay12hRows] = await dbQuery(aabanpayWindowSql('12 hours'), aabanpayWindowParams)
-    const [aabanpay24hRows] = await dbQuery(aabanpayWindowSql('24 hours'), aabanpayWindowParams)
-    const [aabanpay48hRows] = await dbQuery(aabanpayWindowSql('48 hours'), aabanpayWindowParams)
-
-    const orders = Array.isArray(ordersRows) ? ordersRows : []
-    const pending = Array.isArray(pendingRows) ? pendingRows : []
-    const completed = Array.isArray(completedRows) ? completedRows : []
-
-    const pendingPayments = Array.isArray(pendingPaymentsRows) ? pendingPaymentsRows : []
-    const completedPayments = Array.isArray(completedPaymentsRows) ? completedPaymentsRows : []
-
-    const links1h = Array.isArray(paymentLinks1hRows) ? paymentLinks1hRows : []
-    const links12h = Array.isArray(paymentLinks12hRows) ? paymentLinks12hRows : []
-    const links24h = Array.isArray(paymentLinks24hRows) ? paymentLinks24hRows : []
-    const links7d = Array.isArray(paymentLinks7dRows) ? paymentLinks7dRows : []
-    const linksTotal = Array.isArray(paymentLinksTotalRows) ? paymentLinksTotalRows : []
-    const ivmsPaid = Array.isArray(ivmsPaidRows) ? ivmsPaidRows : []
-    const ibPaid = Array.isArray(ibPaidRows) ? ibPaidRows : []
-    const klymePaid = Array.isArray(klymePaidRows) ? klymePaidRows : []
-    const aabanpayPaid = Array.isArray(aabanpayPaidRows) ? aabanpayPaidRows : []
+    const row0 = (rows) => (Array.isArray(rows) && rows[0] ? rows[0] : {})
+    const ord = row0(ordersAggRows)
+    const links = row0(linksAggRows)
+    const recv = row0(receivedAggRows)
     const aabanpayFallback = Array.isArray(aabanpayFallbackRows) ? aabanpayFallbackRows : []
-    const klyme1h = Array.isArray(klyme1hRows) ? klyme1hRows : []
-    const klyme12h = Array.isArray(klyme12hRows) ? klyme12hRows : []
-    const klyme24h = Array.isArray(klyme24hRows) ? klyme24hRows : []
-    const klyme48h = Array.isArray(klyme48hRows) ? klyme48hRows : []
-    const aabanpay1h = Array.isArray(aabanpay1hRows) ? aabanpay1hRows : []
-    const aabanpay12h = Array.isArray(aabanpay12hRows) ? aabanpay12hRows : []
-    const aabanpay24h = Array.isArray(aabanpay24hRows) ? aabanpay24hRows : []
-    const aabanpay48h = Array.isArray(aabanpay48hRows) ? aabanpay48hRows : []
 
+    const byProvider = new Map(
+      (Array.isArray(providerAggRows) ? providerAggRows : []).map((r) => [String(r.provider || ''), r])
+    )
+    const klyme = byProvider.get('klyme') || {}
+    const aabanpay = byProvider.get('aabanpay') || {}
+
+    // Counts are passed through as-is (pg returns bigint as a string) wherever
+    // the previous response did, so the payload is byte-for-byte unchanged.
     return res.json({
-      totalOrders: orders[0]?.count || 0,
-      totalRevenue: Number(orders[0]?.revenue || 0),
-      pendingOrders: pending[0]?.count || 0,
-      completedOrders: completed[0]?.count || 0,
-      pendingPaymentsTotal: Number(pendingPayments[0]?.amount || 0),
-      completedPaymentsTotal: Number(completedPayments[0]?.amount || 0),
-      receivedPaymentsCount: Number(receivedAllTime?.count || 0),
-      receivedPaymentsAmount: Number(receivedAllTime?.amount || 0),
-      receivedPaymentsCount24h: Number(received24h?.count || 0),
-      receivedPaymentsAmount24h: Number(received24h?.amount || 0),
-      receivedPaymentsCount48h: Number(received48h?.count || 0),
-      receivedPaymentsAmount48h: Number(received48h?.amount || 0),
-      receivedPaymentsCount7d: Number(received7d?.count || 0),
-      receivedPaymentsAmount7d: Number(received7d?.amount || 0),
-      receivedPaymentsCount30d: Number(received30d?.count || 0),
-      receivedPaymentsAmount30d: Number(received30d?.amount || 0),
-      ibalticxPaidCount: Number(ibPaid[0]?.count || 0),
-      ibalticxPaidTotal: Number(ibPaid[0]?.amount || 0),
-      klymePaidCount: Number(klymePaid[0]?.count || 0),
-      klymePaidTotal: Number(klymePaid[0]?.amount || 0),
-      klymePaidCount1h: Number(klyme1h[0]?.count || 0),
-      klymePaidCount12h: Number(klyme12h[0]?.count || 0),
-      klymePaidCount24h: Number(klyme24h[0]?.count || 0),
-      klymePaidCount48h: Number(klyme48h[0]?.count || 0),
-      klymePaidTotal1h: Number(klyme1h[0]?.amount || 0),
-      klymePaidTotal12h: Number(klyme12h[0]?.amount || 0),
-      klymePaidTotal24h: Number(klyme24h[0]?.amount || 0),
-      klymePaidTotal48h: Number(klyme48h[0]?.amount || 0),
-      ivmsPaidCount: Number(ivmsPaid[0]?.count || 0),
-      ivmsPaidTotal: Number(ivmsPaid[0]?.amount || 0),
-      aabanpayPaidCount: Number(aabanpayPaid[0]?.count || 0) || Number(aabanpayFallback[0]?.count || 0),
-      aabanpayPaidTotal: Number(aabanpayPaid[0]?.amount || 0) || Number(aabanpayFallback[0]?.amount || 0),
-      aabanpayPaidCount1h: Number(aabanpay1h[0]?.count || 0),
-      aabanpayPaidTotal1h: Number(aabanpay1h[0]?.amount || 0),
-      aabanpayPaidCount12h: Number(aabanpay12h[0]?.count || 0),
-      aabanpayPaidTotal12h: Number(aabanpay12h[0]?.amount || 0),
-      aabanpayPaidCount24h: Number(aabanpay24h[0]?.count || 0),
-      aabanpayPaidTotal24h: Number(aabanpay24h[0]?.amount || 0),
-      aabanpayPaidCount48h: Number(aabanpay48h[0]?.count || 0),
-      aabanpayPaidTotal48h: Number(aabanpay48h[0]?.amount || 0),
-      totalPaymentLinksSent: linksTotal[0]?.count || 0,
-      paymentLinksSent1h: links1h[0]?.count || 0,
-      paymentLinksSent12h: links12h[0]?.count || 0,
-      paymentLinksSent24h: links24h[0]?.count || 0,
-      paymentLinksSent7d: links7d[0]?.count || 0,
+      totalOrders: ord.total_count || 0,
+      totalRevenue: Number(ord.total_revenue || 0),
+      pendingOrders: ord.pending_count || 0,
+      completedOrders: ord.completed_count || 0,
+      pendingPaymentsTotal: Number(ord.pending_payments_amount || 0),
+      completedPaymentsTotal: Number(ord.completed_payments_amount || 0),
+      receivedPaymentsCount: Number(recv.all_count || 0),
+      receivedPaymentsAmount: Number(recv.all_amount || 0),
+      receivedPaymentsCount24h: Number(recv.c24h || 0),
+      receivedPaymentsAmount24h: Number(recv.a24h || 0),
+      receivedPaymentsCount48h: Number(recv.c48h || 0),
+      receivedPaymentsAmount48h: Number(recv.a48h || 0),
+      receivedPaymentsCount7d: Number(recv.c7d || 0),
+      receivedPaymentsAmount7d: Number(recv.a7d || 0),
+      receivedPaymentsCount30d: Number(recv.c30d || 0),
+      receivedPaymentsAmount30d: Number(recv.a30d || 0),
+      ibalticxPaidCount: Number(recv.ib_count || 0),
+      ibalticxPaidTotal: Number(recv.ib_amount || 0),
+      klymePaidCount: Number(klyme.all_count || 0),
+      klymePaidTotal: Number(klyme.all_amount || 0),
+      klymePaidCount1h: Number(klyme.c1h || 0),
+      klymePaidCount12h: Number(klyme.c12h || 0),
+      klymePaidCount24h: Number(klyme.c24h || 0),
+      klymePaidCount48h: Number(klyme.c48h || 0),
+      klymePaidTotal1h: Number(klyme.a1h || 0),
+      klymePaidTotal12h: Number(klyme.a12h || 0),
+      klymePaidTotal24h: Number(klyme.a24h || 0),
+      klymePaidTotal48h: Number(klyme.a48h || 0),
+      ivmsPaidCount: Number(recv.ivms_count || 0),
+      ivmsPaidTotal: Number(recv.ivms_amount || 0),
+      aabanpayPaidCount: Number(aabanpay.all_count || 0) || Number(aabanpayFallback[0]?.count || 0),
+      aabanpayPaidTotal: Number(aabanpay.all_amount || 0) || Number(aabanpayFallback[0]?.amount || 0),
+      aabanpayPaidCount1h: Number(aabanpay.c1h || 0),
+      aabanpayPaidTotal1h: Number(aabanpay.a1h || 0),
+      aabanpayPaidCount12h: Number(aabanpay.c12h || 0),
+      aabanpayPaidTotal12h: Number(aabanpay.a12h || 0),
+      aabanpayPaidCount24h: Number(aabanpay.c24h || 0),
+      aabanpayPaidTotal24h: Number(aabanpay.a24h || 0),
+      aabanpayPaidCount48h: Number(aabanpay.c48h || 0),
+      aabanpayPaidTotal48h: Number(aabanpay.a48h || 0),
+      totalPaymentLinksSent: links.total_count || 0,
+      paymentLinksSent1h: links.c1h || 0,
+      paymentLinksSent12h: links.c12h || 0,
+      paymentLinksSent24h: links.c24h || 0,
+      paymentLinksSent7d: links.c7d || 0,
     })
   } catch (e) {
     console.error('[admin-service] /api/admin/stats failed:', e?.message || e)
