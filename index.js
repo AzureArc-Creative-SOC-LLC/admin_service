@@ -159,7 +159,10 @@ async function postExternalHasEntry(payload) {
 }
 
 function envInt(name, fallback) {
+
+  
   const raw = env(name, '')
+  if (raw === '') return fallback
   const n = Number(raw)
   return Number.isFinite(n) ? n : fallback
 }
@@ -302,6 +305,12 @@ async function resolveBrandFromForDomain(domainName) {
 // analytics don't need per-second freshness, and this avoids re-running
 // expensive aggregate queries every time an admin flips the domain/range filter.
 const DASHBOARD_CACHE_TTL_MS = envInt('DASHBOARD_CACHE_TTL_MS', 20 * 1000)
+
+// Cache keys embed caller-supplied values (domain, range, ?since), so the map
+// needs a ceiling or a client varying them grows it without bound. Entries are
+// also only evicted lazily when their own key is read again, which means keys
+// that are never requested a second time would otherwise linger forever.
+const DASHBOARD_CACHE_MAX_ENTRIES = envInt('DASHBOARD_CACHE_MAX_ENTRIES', 500)
 const dashboardCache = new Map()
 
 function getCachedDashboard(key) {
@@ -315,6 +324,19 @@ function getCachedDashboard(key) {
 }
 
 function setCachedDashboard(key, value) {
+  if (!dashboardCache.has(key) && dashboardCache.size >= DASHBOARD_CACHE_MAX_ENTRIES) {
+    const now = Date.now()
+    for (const [k, entry] of dashboardCache) {
+      if (now > entry.expires) dashboardCache.delete(k)
+    }
+    // Still at the ceiling with nothing expired: evict oldest-inserted first
+    // (Map iterates in insertion order) to make room.
+    while (dashboardCache.size >= DASHBOARD_CACHE_MAX_ENTRIES) {
+      const oldest = dashboardCache.keys().next()
+      if (oldest.done) break
+      dashboardCache.delete(oldest.value)
+    }
+  }
   dashboardCache.set(key, { value, expires: Date.now() + DASHBOARD_CACHE_TTL_MS })
 }
 
@@ -5548,6 +5570,19 @@ app.get('/api/admin/verify', requireAuth, async (req, res) => {
 app.get('/api/admin/stats', requireAuth, async (req, res) => {
   try {
     const domainId = await resolveAdminDomainFilter(req)
+
+    // ?since only shifts the IVMS figures, but it still has to be part of the
+    // key. Keying on the parsed instant rather than the raw string means
+    // equivalent spellings share an entry and unparseable values — which the
+    // queries treat as "no since" — all collapse onto the same one.
+    const sinceRaw = req.query?.since
+    const since = sinceRaw ? new Date(String(sinceRaw)) : null
+    const sinceDate = since && Number.isFinite(since.getTime()) ? since : null
+
+    const cacheKey = `stats:${domainId ?? 'all'}:${sinceDate ? sinceDate.toISOString() : 'none'}`
+    const cached = getCachedDashboard(cacheKey)
+    if (cached) return res.json(cached)
+
     const domainOrdersWhere = domainId != null ? 'AND domain_id = $1' : ''
     const domainOrdersParams = domainId != null ? [domainId] : []
     const domainLinksWhere = domainId != null ? 'AND domain_id = $1' : ''
@@ -5559,9 +5594,6 @@ app.get('/api/admin/stats', requireAuth, async (req, res) => {
     // they're grouped here into five statements: aggregates that share a table
     // and a WHERE clause are computed together with COUNT/SUM ... FILTER, which
     // also means each table is scanned once instead of once per counter.
-    const sinceRaw = req.query?.since
-    const since = sinceRaw ? new Date(String(sinceRaw)) : null
-    const sinceDate = since && Number.isFinite(since.getTime()) ? since : null
 
     const receivedStatuses = [
       'paid',
@@ -5744,7 +5776,7 @@ app.get('/api/admin/stats', requireAuth, async (req, res) => {
 
     // Counts are passed through as-is (pg returns bigint as a string) wherever
     // the previous response did, so the payload is byte-for-byte unchanged.
-    return res.json({
+    const payload = {
       totalOrders: ord.total_count || 0,
       totalRevenue: Number(ord.total_revenue || 0),
       pendingOrders: ord.pending_count || 0,
@@ -5790,7 +5822,10 @@ app.get('/api/admin/stats', requireAuth, async (req, res) => {
       paymentLinksSent12h: links.c12h || 0,
       paymentLinksSent24h: links.c24h || 0,
       paymentLinksSent7d: links.c7d || 0,
-    })
+    }
+
+    setCachedDashboard(cacheKey, payload)
+    return res.json(payload)
   } catch (e) {
     console.error('[admin-service] /api/admin/stats failed:', e?.message || e)
     return res.status(500).json({ error: e?.message || 'Failed to fetch stats' })
