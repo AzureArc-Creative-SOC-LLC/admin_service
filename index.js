@@ -441,9 +441,16 @@ app.get('/api/admin/dashboard/summary', requireAuth, async (req, res) => {
         `SELECT
            COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS new_today,
            COUNT(*) FILTER (WHERE LOWER(status) = 'pending') AS pending,
-           COUNT(*) FILTER (WHERE LOWER(status) = 'in_progress') AS processing,
+           -- 'in_progress' is the wholesale_orders vocabulary and was never written
+           -- to this table; it is kept only so any legacy row still lands somewhere.
+           COUNT(*) FILTER (WHERE LOWER(status) IN ('processing','in_progress')) AS processing,
+           COUNT(*) FILTER (WHERE LOWER(status) = 'dispatched') AS dispatched,
            COUNT(*) FILTER (WHERE LOWER(status) = 'delivered') AS delivered,
            COUNT(*) FILTER (WHERE LOWER(status) = 'cancelled') AS cancelled,
+           COUNT(*) FILTER (
+             WHERE LOWER(COALESCE(status,'')) NOT IN
+               ('pending','processing','in_progress','dispatched','delivered','cancelled')
+           ) AS other,
            COUNT(*) AS total
          FROM orders WHERE 1=1 ${ordersDomainClause}`,
         ordersDomainParams
@@ -573,8 +580,12 @@ app.get('/api/admin/dashboard/summary', requireAuth, async (req, res) => {
         newToday: Number(ord.new_today || 0),
         pending: Number(ord.pending || 0),
         processing: Number(ord.processing || 0),
+        dispatched: Number(ord.dispatched || 0),
         delivered: Number(ord.delivered || 0),
         cancelled: Number(ord.cancelled || 0),
+        // Catch-all so the named buckets always reconcile to `total`. NULL and
+        // whitespace-padded statuses land here rather than silently vanishing.
+        other: Number(ord.other || 0),
         total: Number(ord.total || 0),
       },
       payments: {
@@ -5709,8 +5720,8 @@ app.get('/api/admin/stats', requireAuth, async (req, res) => {
       SELECT
         COUNT(*) AS total_count,
         COALESCE(SUM(total),0) AS total_revenue,
-        COUNT(*) FILTER (WHERE status = 'pending') AS pending_count,
-        COUNT(*) FILTER (WHERE status IN ('delivered','completed') OR payment_status = 'paid') AS completed_count,
+        COUNT(*) FILTER (WHERE LOWER(status) = 'pending') AS pending_count,
+        COUNT(*) FILTER (WHERE LOWER(status) = 'delivered' OR LOWER(payment_status) = 'paid') AS completed_count,
         COALESCE(SUM(total) FILTER (WHERE LOWER(payment_status) IN ('pending','unpaid')),0) AS pending_payments_amount,
         COALESCE(SUM(total) FILTER (WHERE LOWER(payment_status) = 'received'),0) AS completed_payments_amount
       FROM orders
@@ -6484,13 +6495,13 @@ app.get('/api/admin/stats/timeseries', requireAuth, async (req, res) => {
         END),0) AS receivedAmount,
         SUM(CASE
           WHEN (lp.order_id IS NOT NULL OR LOWER(COALESCE(orders.payment_status,'')) IN (${receivedPlaceholders}))
-            AND LOWER(COALESCE(orders.status,'')) IN ('completed','delivered')
+            AND LOWER(COALESCE(orders.status,'')) = 'delivered'
             THEN 1
           ELSE 0
         END) AS completedCount,
         COALESCE(SUM(CASE
           WHEN (lp.order_id IS NOT NULL OR LOWER(COALESCE(orders.payment_status,'')) IN (${receivedPlaceholders}))
-            AND LOWER(COALESCE(orders.status,'')) IN ('completed','delivered')
+            AND LOWER(COALESCE(orders.status,'')) = 'delivered'
             THEN COALESCE(lp.amount, orders.total, 0)
           ELSE 0
         END),0) AS completedAmount
