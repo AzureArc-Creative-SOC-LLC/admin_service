@@ -283,7 +283,7 @@ Same response shape as `GET /api/admin/order/:id`.
 }
 ```
 
-Valid `status` values: `pending` · `processing` · `dispatched` · `delivered` · `completed` · `cancelled`
+Valid `status` values: `pending` · `processing` · `dispatched` · `delivered` · `cancelled`
 
 **Response `200`:**
 ```json
