@@ -34,6 +34,10 @@ function validateMessages(raw) {
     const content = typeof m.content === 'string' ? m.content.trim() : ''
     if (!content) return { error: 'each message needs non-empty string content' }
     if (content.length > MAX_MESSAGE_CHARS) {
+      if (m.role === 'assistant') {
+        messages.push({ role: m.role, content: content.slice(0, MAX_MESSAGE_CHARS) + '\n[…truncated]' })
+        continue
+      }
       return { error: `message too long (max ${MAX_MESSAGE_CHARS} characters)` }
     }
     messages.push({ role: m.role, content })

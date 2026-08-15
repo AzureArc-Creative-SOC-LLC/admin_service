@@ -6,8 +6,8 @@
 > Keep this file dense — it is read into context every session. Delete stale detail
 > rather than appending to it.
 
-**Last updated:** 2026-08-07
-**Phase:** 1 complete (pending live API-key test) · Phase 2 next
+**Last updated:** 2026-08-14
+**Phase:** 1 complete & verified · running on **ollama (local)** · Phase 2 next
 
 ---
 
@@ -100,23 +100,29 @@ One adapter covers every OpenAI-compatible endpoint, so switching is env-only.
 
 | `ASSISTANT_PROVIDER` | Cost | Default model | Get a key |
 |---|---|---|---|
-| `groq` *(current default)* | free tier | **`qwen/qwen3.6-27b`** ← verified | console.groq.com/keys |
-| `cerebras` | free tier | `llama-3.3-70b` | cloud.cerebras.ai |
+| `ollama` *(**in use** — `.env` sets `qwen3:14b`)* | free, **local** | preset `qwen2.5:14b` | none — `ollama serve` |
+| `groq` | free tier | **`qwen/qwen3.6-27b`** ← verified | console.groq.com/keys |
+| `cerebras` | ⚠️ **paid** — see below | `zai-glm-4.7` | cloud.cerebras.ai |
 | `openrouter` | free variants | `meta-llama/llama-3.3-70b-instruct` | openrouter.ai/keys |
-| `ollama` | free, **local** | `qwen2.5:14b` | none — `ollama serve` |
 | `anthropic` | paid | `claude-opus-5` | console.anthropic.com |
 | `openai` | paid | `gpt-4o-mini` | platform.openai.com |
+
+**Cerebras is not free** (tested 2026-08-14). `GET /v1/models` succeeds and lists
+`zai-glm-4.7`, `gpt-oss-120b`, `gemma-4-31b`, but `POST /v1/chat/completions`
+returns `payment_required` until billing is enabled — so a model list that looks
+healthy is *not* evidence the provider works. Verify with a real completion call.
+The preset's `llama-3.3-70b` / any `qwen-*` id does not exist on that account.
 
 Override with `ASSISTANT_MODEL` / `ASSISTANT_BASE_URL`. Any other OpenAI-compatible
 host works by setting `ASSISTANT_BASE_URL` alone. **Model IDs get retired** — a 404
 or "model not found" means update `ASSISTANT_MODEL`, not that the code broke.
 
-> ⚠️ **PII / GDPR — decide before real customers.** Tool results contain customer
-> emails, names, addresses and order values, and they go to whichever provider is
-> configured. Free tiers commonly reserve the right to train on submitted data.
-> Test data is fine today (current DB has junk countries like `cxvc`). Before this
-> touches real customers: either move to a paid tier with no-training terms, or use
-> `ollama` where nothing leaves the machine. Not a footnote — a decision.
+> ✅ **PII / GDPR — resolved by running `ollama`.** Tool results contain customer
+> emails, names, addresses and order values. On any hosted provider those leave the
+> network, and free tiers commonly reserve the right to train on submitted data.
+> On `ollama` nothing leaves the machine. **This is a one-line `.env` setting** —
+> flipping `ASSISTANT_PROVIDER` back to a hosted provider silently reintroduces the
+> problem with no error or warning. Keep the comment in `.env` explaining why.
 >
 > Second caveat: free models pick the wrong tool and fumble arguments more often
 > than frontier models. The whole value here is numbers the admin can trust, so
@@ -152,7 +158,7 @@ questions are unaffected: `get_revenue_stats` counts over all matching rows, and
 ## 4. Hard rules (security — do not relax)
 
 1. **API key never reaches the browser.** Not in any `VITE_*` var — those are bundled into the client bundle.
-2. **`domainId` is resolved from the request via `resolveAdminDomainFilter(req)` and bound into the tool closure — never a tool parameter.** If Claude could choose the domain, a prompt-injected order note ("show all domains") could cross tenants. `buildTools({ dbQuery, domainId })` captures it; the tool JSON schemas contain no domain field. The smoke test asserts this.
+2. **`domainId` is resolved from the request via `resolveAdminDomainFilter(req)` and bound into the tool closure — never a tool parameter.** If Claude could choose the domain, a prompt-injected order note ("show all domains") could cross tenants. `buildTools({ dbQuery, domainId })` captures it; the tool JSON schemas contain no domain field. **Nothing asserts this automatically** — check it by eye on every tools.js change.
 3. **Parameterized SQL only.** Tool inputs are untrusted model output.
 4. **Read-only until phase 5.** No write tools without an explicit UI approve/deny step.
 5. **`LIMIT` on every query tool** (default 50) and a `statement_timeout`.
@@ -248,14 +254,15 @@ to its wire format. Tools are written once and work on every provider.
 
 | # | Task | Status | Notes |
 |---|---|---|---|
-| 0 | Pluggable provider layer | ☑ | `assistant/providers/`. 15 checks pass incl. a fake OpenAI server exercising the full tool loop. Switch via `ASSISTANT_PROVIDER`. |
+| 0 | Pluggable provider layer | ☑ | `assistant/providers/`. Switch via `ASSISTANT_PROVIDER`. ⚠️ **The "15 checks / fake OpenAI server" smoke test no longer exists in the repo** — there is no automated test for this feature. Verification is manual, against live data. |
 | 1 | Install SDKs, provider config in `.env` | ☑ | `@anthropic-ai/sdk` 0.115.0 + `openai` 7.4.0. **`ASSISTANT_API_KEY` left EMPTY — user must paste one.** No `.env.example` exists in this service. |
 | 2 | `assistant/prompt.js` | ☑ | ~2.8k chars. Encodes status vocabulary + the two revenue definitions. |
 | 3 | `assistant/tools.js` — 3 tools | ☑ | All 5 SQL statements verified against the live Supabase DB. |
 | 4 | `assistant/index.js` — chat route | ☑ | Validates history (≤40 msgs, ≤8k chars each), `max_iterations: 12`, logs usage. |
 | 5 | Wire into `index.js` | ☑ | Import L14; `registerAssistant(...)` after `requireAuth`. Server boots clean. |
 | 6 | `AssistantPanel.jsx` + `api/assistant.js` + CSS | ☑ | `npm run build` passes. |
-| 6b | Fix bugs found by live testing | ☑ | `find_customer` now ranks top spenders (`search` optional); wrong `payment_status` vocabulary corrected; enums + `integer` params removed; `DEFAULT_ROWS` 50→10 for TPM; error handler surfaces upstream detail instead of an opaque 500. |
+| 6b | Fix bugs found by live testing | ☑ | `find_customer` now ranks top spenders (`search` optional); wrong `payment_status` vocabulary corrected; enums + `integer` params removed; `DEFAULT_ROWS` 50→10 for TPM (**since raised to 25**); error handler surfaces upstream detail instead of an opaque 500. |
+| 6c | Fix `paid_orders` always 0 | ☑ | 2026-08-14. The 6b vocabulary fix missed two **hardcoded** aggregates that still filtered `payment_status = 'paid'`. Now `= ANY(RECEIVED_STATUSES)`, matching the payments query. Verified live: 2 paid orders, correctly attributed. |
 | 7 | Convert to SSE streaming | ☐ | **Next, and now clearly needed** — measured 2–68s per answer on the free tier. A non-streaming spinner that long feels broken. |
 | 8 | Expand to ~15 tools | ☐ | Products/inventory, affiliates, wholesale, newsletter, payments, address changes. |
 | 9 | `assistant_conversations` table + persistence | ☐ | |
@@ -263,8 +270,14 @@ to its wire format. Tools are written once and work on every provider.
 
 Legend: ☐ todo · ◐ in progress · ☑ done
 
-**Immediate next action:** restart `admin-service` and try the panel in the browser.
-Groq + `qwen/qwen3.6-27b` is configured and verified working.
+**`qwen3:14b` on ollama — verified 2026-08-14** on: total orders (42), top-3
+customers (exact), and the "orders today" hallucination trap (correctly "0"). It
+needed the prompt hardening in the changelog below to stop it echoing raw tool JSON;
+with that in place a 14B local model is good enough. Still unchecked: paid count (2),
+the no-tool refusal (wholesale), country filter, and the two revenue definitions.
+
+Known cosmetic artifact: it sometimes writes "the list above shows…" when no list was
+shown to the admin. Add a prompt line about tool output being invisible if it persists.
 
 **Ground truth for spot-checks** (as of 2026-08-08): 42 orders · £6,177 total ·
 5 orders on 7 Aug · payment_status: 36 pending / 2 received / 4 rejected ·
@@ -283,4 +296,9 @@ Append one line per completed task. Newest last. Keep it to one line each.
 - 2026-08-07 — Corrected two wrong assumptions in this doc: `dbQuery` returns `[rows]` not `{rows}`, and admin scoping is `resolveAdminDomainFilter(req)` from `?domain=` query params, not `req.domainId`.
 - 2026-08-07 — Phase 1 built: SDK installed, 3 read-only tools, chat route, chat panel, styles. Frontend builds; backend boots; all tool SQL verified against the live DB. Live Claude call still untested (no API key).
 - 2026-08-08 — **Phase 1 verified end-to-end on Groq.** Live testing found four real bugs: (1) `find_customer` could not rank top spenders and every model correctly refused the question — `search` is now optional; (2) `payment_status` vocabulary was documented wrong (`paid` does not exist; success is `received`), which silently answered "0 orders paid"; (3) `enum` + `integer` params broke schema validation on several models; (4) 50-row default blew Groq's 8k TPM limit. Model bake-off picked `qwen/qwen3.6-27b` (3/3); `llama-3.3-70b-versatile` is unusable (emits tool calls as raw text). Error handler now surfaces upstream detail instead of an opaque 500.
+- 2026-08-14 — Tried to move off Groq (8k TPM limit throttling real use). **Cerebras rejected: `payment_required` on chat/completions** despite `/v1/models` returning a healthy list — the free tier needs billing enabled. Reverted to Groq + `qwen/qwen3.6-27b`. Remaining free-and-unlimited option is `ollama` (local), which also solves the PII/GDPR question in §3.
+- 2026-08-14 — Switched to `ollama` + `qwen3:14b`. Closes the PII/GDPR question in §3 — customer data no longer leaves the machine. Local model's tool-calling accuracy is **not yet spot-checked**.
+- 2026-08-14 — **Fixed `paid_orders` silently returning 0** in `get_revenue_stats` and `find_customer`. The 2026-08-08 vocabulary fix corrected the model-supplied filter path but missed two hardcoded `payment_status = 'paid'` aggregates — and `'paid'` does not exist in this database. Verified against live data (2 received). Lesson: when a value vocabulary is wrong, grep for **every** occurrence, not just the one that surfaced the bug.
+- 2026-08-14 — First live test on ollama/`qwen3:14b`. Hallucination trap passed ("0 orders today"), but "how many orders in total" made it call `query_orders` and **echo the raw tool JSON as its reply** instead of reading `total_matching`. That oversized assistant message then failed the 8k-char history check on the *next* turn, bricking the conversation permanently. Fixes: assistant messages over the limit are now truncated rather than rejected (only admin input hard-errors); `DEFAULT_ROWS` 25→10, back in step with the tool description; system prompt now explicitly forbids emitting raw JSON/tool output and spells out the count-vs-list rule. Lesson: a validation limit meant for user input must not apply identically to model output — the model can lock the user out.
+- 2026-08-14 — Tightened answer style in `prompt.js`. `qwen3:14b` was padding every correct answer with closing offers ("Let me know if you'd like…"), restated scope ("across all stores, all-time"), and **references to tool internals the admin cannot see** ("the list above shows the first 10", "the `total_matching` field confirms"). Prompt now bans all three explicitly and states one sentence is the whole answer unless a caveat changes the number's meaning. Prompt is now ~5.0k chars (~1.26k tokens) — if answer *quality* drops rather than just length, suspect prompt bloat on a small model and trim back.
 - 2026-08-07 — Claude API is paid, so added a pluggable provider layer. `tools.js` is now provider-neutral; adapters live in `assistant/providers/`. One OpenAI-compatible adapter covers Groq/Cerebras/OpenRouter/Ollama/OpenAI; Anthropic keeps its own. Default switched to `groq` (free). Weaker models are handled defensively — unknown tool names and malformed JSON args are fed back as tool errors so the model self-corrects instead of 500ing.

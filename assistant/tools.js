@@ -15,11 +15,6 @@
 // Each adapter in ./providers/ translates this into its own wire format, so a
 // tool is written once and works on every provider.
 
-// Rows returned feed straight back into the model's context, so this is a token
-// budget as much as a query limit. Groq's free tier allows only 8,000 tokens per
-// minute — 50 order rows alone overruns it (HTTP 413). 10 is ample for a chat
-// answer; aggregate questions go through get_revenue_stats, which counts over
-// ALL matching rows regardless of this cap.
 const DEFAULT_ROWS = 10
 const MAX_ROWS = 50
 
@@ -65,9 +60,6 @@ export function buildTools({ dbQuery, domainId }) {
         properties: {
           order_number: { type: 'string', description: 'Exact order number, e.g. "ORD-4821".' },
           customer_email: { type: 'string', description: 'Customer email address, matched case-insensitively.' },
-          // Deliberately NOT enums: the live vocabulary drifts from what the
-          // app code writes, and an enum silently blocks valid values.
-          // Matched case-insensitively in SQL.
           status: {
             type: 'string',
             description:
@@ -171,12 +163,12 @@ export function buildTools({ dbQuery, domainId }) {
                   COUNT(*)::int                       AS order_count,
                   COALESCE(SUM(o.total), 0)           AS order_value,
                   COALESCE(AVG(o.total), 0)           AS avg_order_value,
-                  COUNT(*) FILTER (WHERE LOWER(o.payment_status) = 'paid')::int AS paid_orders
+                  COUNT(*) FILTER (WHERE LOWER(o.payment_status) = ANY($5::text[]))::int AS paid_orders
              FROM orders o
             WHERE ${dateWhere}
             GROUP BY o.currency
             ORDER BY order_value DESC`,
-          params,
+          [...params, RECEIVED_STATUSES],
         )
 
         const [paymentRows] = await dbQuery(
@@ -236,7 +228,7 @@ export function buildTools({ dbQuery, domainId }) {
                   COALESCE(SUM(o.total), 0)        AS lifetime_value,
                   MIN(o.created_at)                AS first_order_at,
                   MAX(o.created_at)                AS last_order_at,
-                  COUNT(*) FILTER (WHERE LOWER(o.payment_status) = 'paid')::int AS paid_orders,
+                  COUNT(*) FILTER (WHERE LOWER(o.payment_status) = ANY($4::text[]))::int AS paid_orders,
                   BOOL_OR(u.id IS NOT NULL)        AS has_account
              FROM orders o
              LEFT JOIN users u
@@ -249,7 +241,7 @@ export function buildTools({ dbQuery, domainId }) {
             GROUP BY LOWER(TRIM(o.customer_email)), o.currency
             ORDER BY lifetime_value DESC
             LIMIT $3`,
-          [domainId ?? null, search, clampLimit(input.limit)],
+          [domainId ?? null, search, clampLimit(input.limit), RECEIVED_STATUSES],
         )
 
         return JSON.stringify({
