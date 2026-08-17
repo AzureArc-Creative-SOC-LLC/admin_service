@@ -146,27 +146,29 @@ export function createOpenAICompatibleProvider(providerId, env = process.env) {
           // Smaller models sometimes emit malformed JSON or invent a tool name.
           // Feed the error back as a tool result so the model can correct itself
           // rather than failing the whole request.
-          let content
+          // Named `toolResult`, not `content`: the streamed assistant text above
+          // is now also called `content`, and shadowing it here is a trap.
+          let toolResult
           if (!tool) {
-            content = JSON.stringify({ error: `No such tool "${name}". Available: ${Object.keys(byName).join(', ')}` })
+            toolResult = JSON.stringify({ error: `No such tool "${name}". Available: ${Object.keys(byName).join(', ')}` })
           } else {
             let args
             try {
               args = JSON.parse(call.function.arguments || '{}')
             } catch {
-              content = JSON.stringify({ error: 'Arguments were not valid JSON. Retry with a valid JSON object.' })
+              toolResult = JSON.stringify({ error: 'Arguments were not valid JSON. Retry with a valid JSON object.' })
             }
-            if (content === undefined) {
+            if (toolResult === undefined) {
               toolsUsed.push({ name, input: args })
               try {
-                content = await tool.run(args)
+                toolResult = await tool.run(args)
               } catch (e) {
-                content = JSON.stringify({ error: `Tool failed: ${e?.message || e}` })
+                toolResult = JSON.stringify({ error: `Tool failed: ${e?.message || e}` })
               }
             }
           }
 
-          convo.push({ role: 'tool', tool_call_id: call.id, content: String(content) })
+          convo.push({ role: 'tool', tool_call_id: call.id, content: String(toolResult) })
         }
       }
 
