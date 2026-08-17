@@ -7,9 +7,6 @@
 
 import OpenAI from 'openai'
 
-// Convenience presets so a user only has to set ASSISTANT_PROVIDER + a key.
-// NOTE: model IDs change as providers retire them. If you get a 404/"model not
-// found", check the provider's current model list and set ASSISTANT_MODEL.
 export const PRESETS = {
   groq: {
     baseURL: 'https://api.groq.com/openai/v1',
@@ -33,7 +30,7 @@ export const PRESETS = {
     baseURL: 'http://localhost:11434/v1',
     model: 'qwen2.5:14b',
     keyEnv: 'OLLAMA_API_KEY',
-    apiKeyOptional: true, // Ollama ignores auth; the SDK just needs a non-empty string
+    apiKeyOptional: true, 
     hint: 'Run `ollama serve` and `ollama pull qwen2.5:14b`. Nothing leaves your machine.',
   },
   openai: {
@@ -66,7 +63,10 @@ export function createOpenAICompatibleProvider(providerId, env = process.env) {
       preset.hint ??
       'Set ASSISTANT_BASE_URL, ASSISTANT_MODEL and ASSISTANT_API_KEY.',
 
-    async run({ system, messages, tools, maxIterations }) {
+    // `onEvent` is optional and defaults to a no-op, so the existing
+    // non-streaming JSON route keeps working unchanged. It fires with
+    // `{ type: 'text', delta }` as the model produces the visible answer.
+    async run({ system, messages, tools, maxIterations, onEvent = () => {} }) {
       const byName = Object.fromEntries(tools.map((t) => [t.name, t]))
       const toolSchemas = tools.map((t) => ({
         type: 'function',
@@ -78,24 +78,65 @@ export function createOpenAICompatibleProvider(providerId, env = process.env) {
       const usage = { input_tokens: 0, output_tokens: 0 }
 
       for (let i = 0; i < maxIterations; i++) {
-        const completion = await client.chat.completions.create({
+        const stream = await client.chat.completions.create({
           model,
           messages: convo,
           tools: toolSchemas,
           tool_choice: 'auto',
           max_tokens: 4000,
+          stream: true,
+          stream_options: { include_usage: true },
         })
 
-        usage.input_tokens += completion.usage?.prompt_tokens ?? 0
-        usage.output_tokens += completion.usage?.completion_tokens ?? 0
+        // Streaming hands back fragments, not a finished message, so the
+        // assistant turn is reassembled here before it goes back into `convo`.
+        let content = ''
+        const toolCalls = []
+        let sawChunk = false
 
-        const message = completion.choices?.[0]?.message
-        if (!message) break
-        convo.push(message)
+        for await (const chunk of stream) {
+          sawChunk = true
 
-        const calls = message.tool_calls ?? []
+          if (chunk.usage) {
+            usage.input_tokens += chunk.usage.prompt_tokens ?? 0
+            usage.output_tokens += chunk.usage.completion_tokens ?? 0
+          }
+
+          const delta = chunk.choices?.[0]?.delta
+          if (!delta) continue
+
+          if (delta.content) {
+            content += delta.content
+            onEvent({ type: 'text', delta: delta.content })
+          }
+
+          // Tool calls stream as fragments keyed by their position in the
+          // array — two parallel calls interleave — and the JSON argument
+          // string arrives a few characters at a time. Concatenate, never
+          // assign: some providers split even the tool name across chunks.
+          for (const tc of delta.tool_calls ?? []) {
+            const slot = (toolCalls[tc.index] ??= {
+              id: '',
+              type: 'function',
+              function: { name: '', arguments: '' },
+            })
+            if (tc.id) slot.id = tc.id
+            if (tc.function?.name) slot.function.name += tc.function.name
+            if (tc.function?.arguments) slot.function.arguments += tc.function.arguments
+          }
+        }
+
+        if (!sawChunk) break
+
+        const calls = toolCalls.filter(Boolean)
+        convo.push({
+          role: 'assistant',
+          content: content || null,
+          ...(calls.length > 0 ? { tool_calls: calls } : {}),
+        })
+
         if (calls.length === 0) {
-          return { reply: (message.content ?? '').trim(), toolsUsed, usage }
+          return { reply: content.trim(), toolsUsed, usage }
         }
 
         for (const call of calls) {

@@ -17,7 +17,12 @@ export function createAnthropicProvider(env = process.env) {
     configured: Boolean(client),
     hint: 'Set ANTHROPIC_API_KEY (from console.anthropic.com).',
 
-    async run({ system, messages, tools, maxIterations }) {
+    // Honours the same optional `onEvent` contract as the OpenAI-compatible
+    // adapter, but only emits tool activity — the SDK tool runner is iterated
+    // per-message here, so text arrives whole rather than as deltas. Token-level
+    // streaming needs the runner's streaming mode; unimplemented while the
+    // deployed provider is ollama.
+    async run({ system, messages, tools, maxIterations, onEvent = () => {} }) {
       const runner = client.beta.messages.toolRunner({
         model,
         max_tokens: 8000,
@@ -42,7 +47,10 @@ export function createAnthropicProvider(env = process.env) {
 
       for await (const message of runner) {
         for (const block of message.content) {
-          if (block.type === 'tool_use') toolsUsed.push({ name: block.name, input: block.input })
+          if (block.type === 'tool_use') {
+            toolsUsed.push({ name: block.name, input: block.input })
+            onEvent({ type: 'tool_start', name: block.name })
+          }  
         }
         usage.input_tokens += message.usage?.input_tokens ?? 0
         usage.output_tokens += message.usage?.output_tokens ?? 0
