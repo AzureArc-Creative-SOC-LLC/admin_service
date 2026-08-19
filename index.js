@@ -2269,7 +2269,8 @@ function requireAuth(req, res, next) {
   }
 }
 
-// AI assistant routes (POST /api/admin/assistant/chat). Kept in ./assistant/ to
+// AI assistant routes (POST /api/admin/assistant/chat/stream, GET .../health).
+// Kept in ./assistant/ to stay out of this file — see documentation/AI_ASSISTANT.md.
 registerAssistant(app, { requireAuth, dbQuery, resolveAdminDomainFilter, resolveDomainNameById })
 
 

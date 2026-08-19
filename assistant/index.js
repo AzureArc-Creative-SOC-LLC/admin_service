@@ -1,8 +1,8 @@
-// Admin AI assistant — phase 1 (non-streaming).
+// Admin AI assistant — streaming chat route.
 //
-// Registers POST /api/admin/assistant/chat. The admin sends the full
-// conversation; Claude calls read-only tools against Postgres and returns an
-// answer. Streaming (SSE) lands in phase 2 — see documentation/AI_ASSISTANT.md.
+// Registers POST /api/admin/assistant/chat/stream. The admin sends the full
+// conversation; the model calls read-only tools against Postgres and the answer
+// is streamed back as SSE. See documentation/AI_ASSISTANT.md.
 
 import { buildTools } from './tools.js'
 import { buildSystemPrompt } from './prompt.js'
@@ -51,8 +51,11 @@ function validateMessages(raw) {
 }
 
 // Logs an upstream failure and translates it into an admin-readable message.
-// Shared by both routes: the JSON route sends it as an HTTP status, the SSE
-// route can only send it as an `error` event because its headers are long gone.
+// Returns an `error` event payload, not an HTTP status: by the time the model
+// can fail, the SSE headers are long gone and the status code is already 200.
+//
+// Detail is deliberately surfaced rather than swallowed behind a generic 500 —
+// admins are trusted, and upstream messages never contain our API key.
 function describeFailure(e, provider) {
   const status = e?.status
   const code = e?.error?.code || e?.error?.type
@@ -66,38 +69,29 @@ function describeFailure(e, provider) {
   }
 
   if (status === 401) {
-    return { httpStatus: 503, body: { error: `Credentials rejected by ${provider.id}. Check ASSISTANT_API_KEY.` } }
+    return { error: `Credentials rejected by ${provider.id}. Check ASSISTANT_API_KEY.` }
   }
   if (status === 429) {
-    return { httpStatus: 429, body: { error: `${provider.id} rate limit reached — wait a moment and retry.` } }
+    return { error: `${provider.id} rate limit reached — wait a moment and retry.` }
   }
   // Free tiers cap tokens-per-minute; a broad question can exceed it.
   if (status === 413 || /request too large|tokens per minute|TPM/i.test(upstream)) {
     return {
-      httpStatus: 429,
-      body: {
-        error: `That question exceeded ${provider.id}'s free-tier token limit. Ask something narrower (add a date range or a filter), or upgrade the provider tier.`,
-      },
+      error: `That question exceeded ${provider.id}'s free-tier token limit. Ask something narrower (add a date range or a filter), or upgrade the provider tier.`,
     }
   }
   if (status === 404 || /model.*(not found|does not exist|decommissioned)/i.test(upstream)) {
-    return {
-      httpStatus: 502,
-      body: { error: `Model "${provider.model}" is not available on ${provider.id}. Set ASSISTANT_MODEL in .env to a current model.` },
-    }
+    return { error: `Model "${provider.model}" is not available on ${provider.id}. Set ASSISTANT_MODEL in .env to a current model.` }
   }
   // The model emitted a malformed tool call. This is a model-capability
   // problem, not a bug in the query layer — a stronger model fixes it.
   if (code === 'tool_use_failed' || /tool call validation failed/i.test(upstream)) {
     return {
-      httpStatus: 502,
-      body: {
-        error: `"${provider.model}" failed to produce a valid tool call. This model is weak at function calling — switch ASSISTANT_MODEL (see documentation/AI_ASSISTANT.md).`,
-        detail: upstream,
-      },
+      error: `"${provider.model}" failed to produce a valid tool call. This model is weak at function calling — switch ASSISTANT_MODEL (see documentation/AI_ASSISTANT.md).`,
+      detail: upstream,
     }
   }
-  return { httpStatus: 500, body: { error: `Assistant request failed (${provider.id}): ${upstream}` } }
+  return { error: `Assistant request failed (${provider.id}): ${upstream}` }
 }
 
 export function registerAssistant(app, deps) {
@@ -119,55 +113,13 @@ export function registerAssistant(app, deps) {
     })
   })
 
-  app.post('/api/admin/assistant/chat', requireAuth, async (req, res) => {
-    if (!provider.configured) {
-      return res.status(503).json({ error: `Assistant is not configured. ${provider.hint}` })
-    }
-
-    const { messages, error } = validateMessages(req.body?.messages)
-    if (error) return res.status(400).json({ error })
-
-    const startedAt = Date.now()
-    try {
-      // Domain scope comes from the request (?domain / ?domain_id), exactly like
-      // every other admin endpoint. Claude never chooses it.
-      const domainId = await resolveAdminDomainFilter(req)
-      const domainName = domainId != null ? await resolveDomainNameById(domainId) : null
-
-      const { reply, toolsUsed, usage, exhausted } = await provider.run({
-        system: buildSystemPrompt({ domainName }),
-        messages,
-        tools: buildTools({ dbQuery, domainId }),
-        maxIterations: MAX_ITERATIONS,
-      })
-
-      console.log(
-        `[assistant] provider=${provider.id} admin=${req.adminUser?.username ?? 'unknown'} ` +
-        `domain=${domainName ?? 'all'} tools=${toolsUsed.map((t) => t.name).join(',') || 'none'} ` +
-        `in=${usage.input_tokens} out=${usage.output_tokens} ${Date.now() - startedAt}ms`,
-      )
-
-      if (!reply) {
-        return res.status(502).json({
-          error: exhausted
-            ? 'The assistant kept calling tools without answering — try a narrower question.'
-            : 'The assistant returned no answer.',
-          toolsUsed,
-        })
-      }
-
-      return res.json({ reply, toolsUsed, usage, domain: domainName, provider: provider.id, model: provider.model })
-    } catch (e) {
-      // Surface enough detail to diagnose without another debugging round trip.
-      // Admins are trusted, and upstream messages never contain our API key.
-      const { httpStatus, body } = describeFailure(e, provider)
-      return res.status(httpStatus).json(body)
-    }
-  })
-
-  // Streaming twin of the route above. Same auth, same validation, same domain
-  // scoping — only the transport differs: instead of one JSON response at the
-  // end, tokens are pushed as they are produced. See documentation/AI_ASSISTANT.md.
+  // The answer is streamed as Server-Sent Events rather than returned as one
+  // JSON body: a single answer takes seconds (tool round trip, then the model
+  // thinking), which as a static spinner reads as broken.
+  //
+  // Events: `text` (answer fragment), `reasoning` (model thinking — progress
+  // only, never shown as the answer), `tool_start` / `tool_end`, `done`
+  // (authoritative reply + usage), `error`.
   app.post('/api/admin/assistant/chat/stream', requireAuth, async (req, res) => {
     if (!provider.configured) {
       return res.status(503).json({ error: `Assistant is not configured. ${provider.hint}` })
@@ -238,8 +190,7 @@ export function registerAssistant(app, deps) {
         send('done', { reply, toolsUsed, usage, domain: domainName, provider: provider.id, model: provider.model })
       }
     } catch (e) {
-      const { body } = describeFailure(e, provider)
-      send('error', body)
+      send('error', describeFailure(e, provider))
     } finally {
       clearInterval(heartbeat)
       if (!res.writableEnded) res.end()

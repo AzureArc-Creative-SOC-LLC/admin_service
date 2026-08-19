@@ -6,8 +6,8 @@
 > Keep this file dense — it is read into context every session. Delete stale detail
 > rather than appending to it.
 
-**Last updated:** 2026-08-14
-**Phase:** 1 complete & verified · running on **ollama (local)** · Phase 2 next
+**Last updated:** 2026-08-19
+**Phase:** 2 built (streaming; **not yet browser-verified**) · running on **ollama (local)** · Phase 3 next
 
 ---
 
@@ -22,7 +22,7 @@ functions that run SQL against Postgres. No vector DB, no embeddings, no Python,
 no agent framework.
 
 ```
-browser → POST /api/admin/assistant/chat (JWT + domainMiddleware)
+browser → POST /api/admin/assistant/chat/stream (JWT + domainMiddleware)
         → Claude API with tool definitions
         → Claude picks tools → backend runs scoped SQL → rows back to Claude
         → Claude loops until done → text streamed to browser via SSE
@@ -197,7 +197,21 @@ Keep assistant code **out of** `index.js` — it is already 9k lines.
 `tools` arrive neutral (`{name, description, parameters, run}`); the adapter converts
 to its wire format. Tools are written once and work on every provider.
 
-**Routes:** `POST /api/admin/assistant/chat` · `GET /api/admin/assistant/health`
+**Routes:** `POST /api/admin/assistant/chat/stream` (SSE) · `GET /api/admin/assistant/health`
+
+**SSE events** — the adapter emits them via `onEvent`, the route forwards each as
+an event of the same name, `chatStream()` hands them to the panel:
+
+| Event | Payload | UI |
+|---|---|---|
+| `text` | `delta` | appended to the answer |
+| `reasoning` | `delta` | **ignored on purpose** — see §7 |
+| `tool_start` / `tool_end` | `name` | status label ("Checking revenue…") |
+| `done` | `reply`, `toolsUsed`, `usage` | replaces accumulated text |
+| `error` | `error` | error line |
+
+Adding an event type needs no route change — the bridge forwards whatever the
+adapter emits.
 
 ---
 
@@ -212,9 +226,10 @@ to its wire format. Tools are written once and work on every provider.
   totals (42 / £6,177), top customers, orders on a given date (5), paid (2),
   rejected (4), recent-order listing — all match the DB exactly.
 
-### Phase 2 — streaming  ☐
-- Convert route to SSE; client reads `ReadableStream`
-- UI shows tool-call activity ("checking revenue…")
+### Phase 2 — streaming  ☑ (built; browser verification outstanding)
+- ☑ Route is SSE; client reads `ReadableStream` via `fetch` (not `EventSource`)
+- ☑ UI shows tool-call activity ("Checking revenue…") and a Stop button
+- ☑ Non-streaming route deleted — SSE is the only chat path
 
 ### Phase 3 — coverage + persistence  ☐
 - Grow to ~15 tools: products/inventory, affiliates, wholesale, newsletter,
@@ -243,6 +258,12 @@ to its wire format. Tools are written once and work on every provider.
 - **Put schema semantics in the system prompt**, not in code comments: which column
   is money, what `status` values mean, that wholesale is a separate order flow,
   that `orders.total` is in `orders.currency` so cross-currency sums need care.
+- **Reasoning events are received and ignored on purpose.** `qwen3` streams ~200
+  thinking tokens per answer as `delta.reasoning` (ollama's field name;
+  OpenAI-style hosts use `reasoning_content`). It is forwarded to the UI as a
+  `reasoning` event but only ever shown as a generic "Thinking…" — a small
+  model's self-correcting monologue restates customer data and reads as *less*
+  trustworthy. It must never be appended to `content` or pushed into `convo`.
 - **Answers with no rows:** instruct the model to say "none found", never to guess.
 - **History is resent every turn** — token cost grows with conversation length.
   This is why phase 4 caching matters.
@@ -263,7 +284,7 @@ to its wire format. Tools are written once and work on every provider.
 | 6 | `AssistantPanel.jsx` + `api/assistant.js` + CSS | ☑ | `npm run build` passes. |
 | 6b | Fix bugs found by live testing | ☑ | `find_customer` now ranks top spenders (`search` optional); wrong `payment_status` vocabulary corrected; enums + `integer` params removed; `DEFAULT_ROWS` 50→10 for TPM (**since raised to 25**); error handler surfaces upstream detail instead of an opaque 500. |
 | 6c | Fix `paid_orders` always 0 | ☑ | 2026-08-14. The 6b vocabulary fix missed two **hardcoded** aggregates that still filtered `payment_status = 'paid'`. Now `= ANY(RECEIVED_STATUSES)`, matching the payments query. Verified live: 2 paid orders, correctly attributed. |
-| 7 | Convert to SSE streaming | ◐ | Provider layer done (both adapters take an optional `onEvent`). Remaining: `tool_start`/`tool_end` in the OpenAI adapter, the SSE route, the client reader, the panel. |
+| 7 | Convert to SSE streaming | ☑ | `onEvent` in both adapters, `POST /chat/stream`, `chatStream()`, panel streams + Stop. Old JSON route deleted. Dead air on "how many orders in total?" 4.3s → 0.58s. ⚠️ **Verified at the adapter layer only** (node harness against live ollama) — the browser path has not been exercised. |
 | 8 | Expand to ~15 tools | ☐ | Products/inventory, affiliates, wholesale, newsletter, payments, address changes. |
 | 9 | `assistant_conversations` table + persistence | ☐ | |
 | 10 | Prompt caching + usage logging to DB | ☐ | Prompt+tools ≈ 3–4k tokens, above the 512-token cache minimum, so worth doing. |
@@ -302,4 +323,9 @@ Append one line per completed task. Newest last. Keep it to one line each.
 - 2026-08-14 — First live test on ollama/`qwen3:14b`. Hallucination trap passed ("0 orders today"), but "how many orders in total" made it call `query_orders` and **echo the raw tool JSON as its reply** instead of reading `total_matching`. That oversized assistant message then failed the 8k-char history check on the *next* turn, bricking the conversation permanently. Fixes: assistant messages over the limit are now truncated rather than rejected (only admin input hard-errors); `DEFAULT_ROWS` 25→10, back in step with the tool description; system prompt now explicitly forbids emitting raw JSON/tool output and spells out the count-vs-list rule. Lesson: a validation limit meant for user input must not apply identically to model output — the model can lock the user out.
 - 2026-08-14 — Tightened answer style in `prompt.js`. `qwen3:14b` was padding every correct answer with closing offers ("Let me know if you'd like…"), restated scope ("across all stores, all-time"), and **references to tool internals the admin cannot see** ("the list above shows the first 10", "the `total_matching` field confirms"). Prompt now bans all three explicitly and states one sentence is the whole answer unless a caveat changes the number's meaning. Prompt is now ~5.0k chars (~1.26k tokens) — if answer *quality* drops rather than just length, suspect prompt bloat on a small model and trim back.
 - 2026-08-17 — Phase 2 step 1: provider adapters now stream. `run()` takes an optional `onEvent` (defaults to no-op, so the existing JSON route is untouched); the OpenAI-compatible adapter uses `stream: true` + `stream_options.include_usage` and reassembles the assistant turn from deltas — tool-call fragments are keyed by `tc.index` and **concatenated**, since name and arguments both arrive split. Anthropic gets `tool_start` only (token deltas need the runner's streaming mode; unimplemented while ollama is the deployed provider). Verified live on ollama/`qwen3:14b` with a fake tool: tool args reassembled correctly, 12 text deltas, usage summed across both iterations.
+- 2026-08-18 — Phase 2 steps 2–3: `POST /api/admin/assistant/chat/stream` (SSE) added **alongside** the JSON route, which stays as a fallback until the UI is converted; `chatStream()` in `admin-dashboard/src/api/assistant.js` reads it with a `fetch` + `ReadableStream` reader (not `EventSource` — no auth headers). Error mapping extracted to `describeFailure()` so both routes word failures identically; validation must run **before** `writeHead`, since after that only an `error` event is possible. 15s `: ping` heartbeat guards against idle-timeout proxies during silent tool iterations.
+- 2026-08-18 — Phase 2 step 1c + **reasoning passthrough**. Measured the real problem: streaming alone barely helped, because ~90% of the wait is *before* the first visible token (tool round trip + the model thinking), and a typical count answer is only ~9 tokens. Probing ollama showed qwen3 streams its thinking as **`delta.reasoning`** (not `reasoning_content`) — 198 tokens per answer that we were discarding. Now forwarded as a `reasoning` event, plus `tool_start`/`tool_end`. **Reasoning is never appended to `content` and never enters `convo`** — it is UI progress only, not the answer and not history. Dead air on "how many orders in total?" fell 4.3s → 0.58s with the reply unchanged.
+- 2026-08-19 — Phase 2 step 4: `AssistantPanel` streams. Tokens append to a placeholder assistant message via a **functional** `setMessages` (a direct read of `messages` inside `onEvent` sees a stale snapshot and drops most tokens). Progress is a **generic** label beside the dots — `reasoning` events are received and ignored on purpose: 200 tokens of a 14B model's self-correcting monologue restates customer data and reads as less trustworthy, not more. `tool_start` maps to friendly text via `TOOL_LABELS` (keep in step with `tools.js`; unmapped names fall back). Added a Stop button (`AbortController`), and auto-scroll now uses `auto` while streaming and skips entirely if the admin has scrolled up.
+- 2026-08-19 — Phase 2 step 5: deleted the non-streaming `POST /chat` route and `assistantApi.chat`; SSE is now the only chat path. `describeFailure()` returns just the event payload (the `httpStatus` half died with the JSON route). Phase 2 is code-complete — but **verified only through a node harness against the adapter**; nobody has run the browser path end to end.
+- 2026-08-19 — First browser test of streaming found two bugs. (1) **Pressing Stop before the first token bricked the conversation.** The empty placeholder assistant message stayed in state, was sent as history on the next question, and the server rejected it — so every later question failed with "each message needs non-empty string content" while the UI just showed unanswered questions. The panel now drops a trailing empty assistant turn and filters empty turns out of history. Same lesson as 2026-08-14: a validation rule aimed at user input must not be able to lock the user out. (2) **The assistant refused to list records** ("individual records cannot be listed here") — the 2026-08-14 anti-raw-JSON rule said "if you find yourself about to paste a list of records, stop and report the count instead", which the model read as a ban on listing at all. Reworded to constrain *format* (no JSON, rewrite as your own lines) while explicitly requiring it to list when asked. Verified on ollama: listing works, and the count answer is unchanged.
 - 2026-08-07 — Claude API is paid, so added a pluggable provider layer. `tools.js` is now provider-neutral; adapters live in `assistant/providers/`. One OpenAI-compatible adapter covers Groq/Cerebras/OpenRouter/Ollama/OpenAI; Anthropic keeps its own. Default switched to `groq` (free). Weaker models are handled defensively — unknown tool names and malformed JSON args are fed back as tool errors so the model self-corrects instead of 500ing.

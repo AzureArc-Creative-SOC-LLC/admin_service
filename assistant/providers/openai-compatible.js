@@ -110,6 +110,9 @@ export function createOpenAICompatibleProvider(providerId, env = process.env) {
             onEvent({ type: 'text', delta: delta.content })
           }
 
+          const reasoning = delta.reasoning ?? delta.reasoning_content
+          if (reasoning) onEvent({ type: 'reasoning', delta: reasoning })
+
           // Tool calls stream as fragments keyed by their position in the
           // array — two parallel calls interleave — and the JSON argument
           // string arrives a few characters at a time. Concatenate, never
@@ -160,11 +163,13 @@ export function createOpenAICompatibleProvider(providerId, env = process.env) {
             }
             if (toolResult === undefined) {
               toolsUsed.push({ name, input: args })
+              onEvent({ type: 'tool_start', name })
               try {
                 toolResult = await tool.run(args)
               } catch (e) {
                 toolResult = JSON.stringify({ error: `Tool failed: ${e?.message || e}` })
               }
+              onEvent({ type: 'tool_end', name })
             }
           }
 
