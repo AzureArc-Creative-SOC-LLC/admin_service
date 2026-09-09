@@ -1,0 +1,5 @@
+current (both changes)    OK  |  REFUSED
+no prompt paragraph       WRONG  |  WRONG
+no date-param sentence    WRONG  |  OK
+neither (pre-fix state)   OK  |  OK
+done

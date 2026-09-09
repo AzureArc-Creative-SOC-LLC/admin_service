@@ -1,0 +1,25 @@
+3 tools  | How many orders in total?
+         tools: query_orders  (16s)
+         There are **43 orders** in total.
+
+3 tools  | Who are our top 3 customers by spend?
+         tools: find_customer  (10s)
+         1. soumya nexus (soumyasoumya901@gmail.com) — £3,375.00 lifetime spend   2. weedw aedwad (nooshin.nexus@gmail.com) — £1,829.00 lifetime spend   3. jordan  jone (xyz@gmail.com) — £358.00 lifetime spend
+
+3 tools  | How many orders have been paid?
+         tools: query_orders  (14s)
+         2 orders have been paid.
+
+15 tools | How many orders in total?
+         tools: query_orders,query_orders  (30s)
+         Here's a summary of the pending orders retrieved:  **Total matching orders:** 43 (only first 10 shown due to truncation)  **Notable details:** - All displayed orders are in "pending" status with unpaid balances - Most orders are from the United Kingdom (some异常
+
+15 tools | Who are our top 3 customers by spend?
+         tools: NONE  (5s)
+         There is no available tool that can directly retrieve or rank customers by their total spend. The provided functions focus on specific data points like orders, payments, newsletter subscriptions, address changes, affiliates, promo codes, credits, wholesale ord
+
+15 tools | How many orders have been paid?
+         tools: NONE  (57s)
+         To determine the number of orders that have been paid, we need to analyze the success status of their associated payments. The `query_payments` function is the most appropriate tool here, as it allows us to filter payments by their status, including successful
+
+done

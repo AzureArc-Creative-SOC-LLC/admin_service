@@ -7,7 +7,7 @@
 > rather than appending to it.
 
 **Last updated:** 2026-08-19
-**Phase:** 2 built (streaming; **not yet browser-verified**) · running on **ollama (local)** · Phase 3 next
+**Phase:** 3 built (15 tools) · streaming **not yet browser-verified** · running on **ollama (local)** · Phase 4 next
 
 ---
 
@@ -64,7 +64,23 @@ browser → POST /api/admin/assistant/chat/stream (JWT + domainMiddleware)
 - `users`: `email`, `name`, `domain_id` — guests order without an account, so
   **email on `orders` is the customer key**, not `users.id`
 - `order_items`: `order_id`, `product_id`, `name`, `sku`, `quantity`, `unit_price`, `line_total`
-- `products` has **no** `domain_id` — the catalog is global across storefronts
+- `products` **does** have a `domain_id` column (the earlier note here was wrong),
+  but every live row has it **NULL**, so the catalogue is in practice global.
+  ⚠️ A plain `domain_id = $1` therefore returns **zero products** as soon as the
+  admin picks a store. `query_products` uses `domain_id IS NULL OR domain_id = $1`.
+- `products`: `name`, `slug`, `sku`, `price`, `currency`, `in_stock` (bool),
+  `stock_qty` (**nullable** = not tracked, which is *not* zero), `is_enabled`
+- **Tables with NO `domain_id` at all** — scope must travel through a join, or
+  cannot be applied: `order_items` (via `orders`), `user_credits` +
+  `credit_ledger` (via `users.user_id` — this join is a security boundary),
+  `wholesale_order_items` (via `wholesale_orders`), and the genuinely global
+  `wholesale_products` / `wholesale_product_inventory` /
+  `wholesale_raw_material_stock` / `wholesale_team_members` /
+  `wholesale_work_allocations`
+- `newsletter_subscribers.consent` / `.is_winner` are **smallint 0/1**, not bool
+- `wholesale_inquiries.submitted_at` is `timestamp` (no time zone), unlike the
+  `timestamptz` used everywhere else — casts must match
+- `domains` has `domain_name`, **not** `name`
 
 **Revenue definitions** (must match the dashboard or the assistant contradicts the UI):
 - Dashboard "Sales" cards = `SUM(orders.total)` over `created_at`, **no status filter**
@@ -91,7 +107,7 @@ inquiries, countries).
 | SDKs | `@anthropic-ai/sdk` v0.115.0 + `openai` v7.4.0, both in `admin-service` |
 | Agent loop | Anthropic: SDK `toolRunner`. OpenAI-compatible: hand-written loop in the adapter. |
 | Transport | SSE (`text/event-stream`). **Not** `EventSource` — it can't send auth headers; use `fetch` + `ReadableStream` reader on the client. |
-| History | Postgres table `assistant_conversations` (see §6) |
+| History | **In-memory only** — React state in the panel. Cleared on reload/logout/tab close. Deliberate: see §6 phase 3. |
 | Key | In `backend/admin-service/.env` — **server-side only**, never a `VITE_*` var |
 
 ### Providers
@@ -172,7 +188,7 @@ questions are unaffected: `get_revenue_stats` counts over all matching rows, and
 | Path | Purpose | Status |
 |---|---|---|
 | `backend/admin-service/assistant/index.js` | `registerAssistant(app, deps)` — chat route | ☑ |
-| `backend/admin-service/assistant/tools.js` | `buildTools({dbQuery, domainId})` — **provider-neutral** | ☑ |
+| `backend/admin-service/assistant/tools.js` | `buildTools({dbQuery, domainId})` — **provider-neutral**, 15 tools | ☑ |
 | `backend/admin-service/assistant/prompt.js` | `buildSystemPrompt({domainName})` | ☑ |
 | `backend/admin-service/assistant/providers/index.js` | `createProvider(env)` — selector | ☑ |
 | `backend/admin-service/assistant/providers/anthropic.js` | Claude adapter (SDK tool runner) | ☑ |
@@ -231,11 +247,31 @@ adapter emits.
 - ☑ UI shows tool-call activity ("Checking revenue…") and a Stop button
 - ☑ Non-streaming route deleted — SSE is the only chat path
 
-### Phase 3 — coverage + persistence  ☐
-- Grow to ~15 tools: products/inventory, affiliates, wholesale, newsletter,
-  payments, address-change requests
-- Table `assistant_conversations (id, domain_id, admin_username, messages jsonb, created_at, updated_at)`
-- Load/resume conversations
+### Phase 3 — coverage  ☑ (code done; **model behaviour not yet spot-checked**)
+- ☑ 15 tools (was 3). Added: `query_products`, `get_product_sales`,
+  `query_payments`, `query_newsletter`, `query_address_changes`,
+  `query_affiliates`, `query_promos`, `query_credits`,
+  `query_wholesale_orders`, `get_wholesale_inventory`,
+  `query_wholesale_production`, `query_wholesale_inquiries`
+- ☑ System prompt gained retail-vs-wholesale separation, stock semantics, and
+  the promo/credit/affiliate distinction. **Its old closing line claimed the
+  assistant had no tools for wholesale/affiliates/inventory/newsletter** — that
+  is now removed; leaving it would have caused false refusals.
+- ☑ `TOOL_LABELS` in `AssistantPanel.jsx` covers all 15 (parity checked).
+- ❌ **Conversation persistence dropped (decided 2026-08-19).** History is
+  in-memory only and is lost on reload / logout / tab close, by design. Do not
+  add an `assistant_conversations` table or load/resume UI.
+- ⚠️ **Still open:** hard rule #4.6 (audit trail for PII access). Today the only
+  record is a console line (`assistant/index.js`, the `[assistant] stream …`
+  log) carrying username/domain/tool names but **not the question or answer**,
+  and it rotates away. Decide deliberately: accept as-is, or add an append-only
+  audit table the admin never reads.
+- ❌ **The predicted risk MATERIALISED. Bake-off scored 2/12 at 15 tools.** See
+  §9 — measured, not suspected. The SQL is fine; the model cannot choose
+  between 15 tools.
+- ☑ **Mitigated:** `ASSISTANT_TOOLS` allowlist exposes 10 tools by default, and
+  invented date arguments are gone (3/12 → 0/12). **Not fully solved** — the
+  plain order-count question remains unreliable at any tool count on this model.
 
 ### Phase 4 — cost + polish  ☐
 - Prompt caching on system prompt + tool defs (`cache_control: {type:'ephemeral'}`)
@@ -285,8 +321,13 @@ adapter emits.
 | 6b | Fix bugs found by live testing | ☑ | `find_customer` now ranks top spenders (`search` optional); wrong `payment_status` vocabulary corrected; enums + `integer` params removed; `DEFAULT_ROWS` 50→10 for TPM (**since raised to 25**); error handler surfaces upstream detail instead of an opaque 500. |
 | 6c | Fix `paid_orders` always 0 | ☑ | 2026-08-14. The 6b vocabulary fix missed two **hardcoded** aggregates that still filtered `payment_status = 'paid'`. Now `= ANY(RECEIVED_STATUSES)`, matching the payments query. Verified live: 2 paid orders, correctly attributed. |
 | 7 | Convert to SSE streaming | ☑ | `onEvent` in both adapters, `POST /chat/stream`, `chatStream()`, panel streams + Stop. Old JSON route deleted. Dead air on "how many orders in total?" 4.3s → 0.58s. ⚠️ **Verified at the adapter layer only** (node harness against live ollama) — the browser path has not been exercised. |
-| 8 | Expand to ~15 tools | ☐ | Products/inventory, affiliates, wholesale, newsletter, payments, address changes. |
-| 9 | `assistant_conversations` table + persistence | ☐ | |
+| 8 | Expand to ~15 tools | ☑ | 2026-08-19. 12 tools added, 15 total. Every SQL statement **executed against the live DB** under `domain=null` and `domain=1`. Invariant audit passes: no domain-ish param, `additionalProperties:false`, all-string params, no enums, on all 15. |
+| 8b | Spot-check the model with 15 tools | ☑ | 2026-08-19. **FAILED — 2/12.** See §9. Tool selection collapses at 15 tools on `qwen3:14b`. Transcripts in `documentation/bakeoff-2026-08-19/`. |
+| 8c | Cap the exposed tool set | ☑ | 2026-08-19. `ASSISTANT_TOOLS` allowlist, 10 tools by default (`selectEnabledTools`). Health endpoint reports the active set; boot logs it and warns above 10. |
+| 8d | Fix invented tool arguments | ☑ | 2026-08-19. Rules on all 18 date params + prompt paragraph. Fabricated dates 3/12 → **0/12**. |
+| 8e | "How many orders in total?" unstable | ☐ | Coin flip at 6 AND 10 tools — model summarises visible rows instead of reading `total_matching`. Regression of the 2026-08-14 fix; not tool-count related. |
+| 8f | Try a stronger local model | ☐ | Untried lever for the count instability and the verbosity. Would also test whether the 10-tool cap can be lifted. |
+| 9 | ~~`assistant_conversations` table + persistence~~ | ❌ | **Dropped 2026-08-19** — history is intentionally session-only. Audit logging (rule 4.6) remains open and is a separate question.|
 | 10 | Prompt caching + usage logging to DB | ☐ | Prompt+tools ≈ 3–4k tokens, above the 512-token cache minimum, so worth doing. |
 
 Legend: ☐ todo · ◐ in progress · ☑ done
@@ -300,16 +341,100 @@ the no-tool refusal (wholesale), country filter, and the two revenue definitions
 Known cosmetic artifact: it sometimes writes "the list above shows…" when no list was
 shown to the admin. Add a prompt line about tool output being invisible if it persists.
 
-**Ground truth for spot-checks** (as of 2026-08-08): 42 orders · £6,177 total ·
-5 orders on 7 Aug · payment_status: 36 pending / 2 received / 4 rejected ·
-top customer soumyasoumya901@gmail.com £3,375 across 22 orders.
+**Ground truth for spot-checks** (re-read from the live DB 2026-08-19 — the
+2026-08-08 figures below it had already drifted, so re-read before trusting):
+43 orders · £6,326 order value · 2 paid · top customer soumyasoumya901@gmail.com
+£3,375 across 22 orders · 43 payments (39 pending / 4 rejected, all provider
+"Manual") · **domain=1 subset:** 29 orders / £4,010 / 1 paid.
+
+⚠️ **Most phase-3 tables are EMPTY on live**, so those tools are SQL-verified but
+behaviour-unverified. Has data: `payments` 43 · `products` 1 · `order_items` (8
+SKUs) · `wholesale_products` 6 · `wholesale_product_inventory` 24 ·
+`wholesale_raw_material_stock` 7 · `wholesale_team_members` 10 · `user_credits` 2
+(both £0.00). **Empty:** affiliates, affiliate_requests, promo_codes,
+promo_redemptions, newsletter_subscribers, order_address_change_requests,
+credit_ledger, wholesale_orders, wholesale_work_allocations, wholesale_inquiries.
+Re-test those tools once real rows exist.
 
 Switching providers is env-only — no code change. `GET /api/admin/assistant/health`
 reports the active provider, model, and a hint when it is misconfigured.
 
 ---
 
-## 9. Changelog
+## 9. The 15-tool collapse (measured 2026-08-19)
+
+Bake-off on `ollama` / `qwen3:14b`, 12 questions against live data: **2 clean
+passes out of 12.** Transcripts: `documentation/bakeoff-2026-08-19/`.
+
+**Controlled A/B — identical prompt, model and questions; only the tool count
+changed:**
+
+| Tools bound | Score | Typical answer |
+|---|---|---|
+| 3 | **3/3** | "There are **43 orders** in total." (24 chars) |
+| 6 / 8 / 10 | 3/4, 4/4, 4/4 — right tool, right number | correct but 700–1,700 chars |
+| 15 | **0/3** | refuses, or a 200-word briefing; leaked CJK characters mid-sentence |
+
+**Conclusions, in order of confidence:**
+1. **The prompt is NOT the cause.** The same prompt yields perfect terse answers
+   at 3 tools. Do not "fix" this by rewriting `prompt.js`.
+2. **Correctness holds to ~10 tools and collapses between 10 and 15** on this
+   model. Cap the exposed set accordingly.
+3. **Terseness degrades separately and much earlier** — from 3 → 6 tools answers
+   balloon to ~1k chars even when correct. Annoying, not dangerous.
+
+### The fix that shipped, and what it did and did not solve
+
+Two changes, both 2026-08-19:
+- **`ASSISTANT_TOOLS` allowlist** (`selectEnabledTools` in `tools.js`). All 15
+  tools stay in the code; **10 are exposed by default**. `ASSISTANT_TOOLS=all`
+  or a comma-separated list overrides. Unknown names are logged and ignored, and
+  an allowlist matching nothing falls back to the default rather than leaving the
+  model toolless — which would fail as confident hallucination, not as an error.
+- **Anti-fabrication rules** — one sentence on all 18 date parameters, plus a
+  prompt paragraph forbidding invented arguments.
+
+| Measure | 15 tools, before | 10 tools, after |
+|---|---|---|
+| Fabricated date arguments | **3 / 12** | **0 / 12** |
+| Out-of-scope questions | invented data, or wrong refusals | honest "I have no tool for that" |
+| Products / sales / payments / credit / wholesale / address queries | mostly wrong | **9/9 correct across repeats** |
+
+**Still NOT fixed — do not present this as solved:**
+- **"How many orders in total?" is a coin flip.** Repeated runs: 11/12 correct at
+  6 tools, 10/12 at 10 tools, failures concentrated on that one question. The
+  model summarises the 10 visible rows instead of reading `total_matching` — the
+  same bug marked fixed on 2026-08-14. It is unstable at **every** tool count
+  tested, so this is a model-capability limit, not a tool-count effect.
+- **Answers remain verbose** (500–1,500 chars) where the prompt asks for one
+  sentence. Only the 3-tool configuration actually obeys the style rules.
+- **Single-run bake-offs are not evidence.** An isolation test of four prompt/
+  schema variants produced OK, WRONG and REFUSED for the *same* variant across
+  repeat runs. Run every question at least 3× before concluding anything — both
+  the 2026-08-08 and 2026-08-14 "fixes" looked solid once and later regressed.
+
+**Next lever, untried:** a stronger local model (e.g. `qwen3:30b-a3b` or a 32B
+class model) would plausibly fix both the count instability and the verbosity,
+and might lift the 10-tool cap. Local inference keeps the §3 PII position
+intact. Re-run these same transcripts to compare like for like.
+
+**The dangerous failure mode is not the refusals — it is invented arguments.**
+At 15 tools the model fabricated filters it was never given (a
+`WH-20240401-001` order code, `test@example.com`, an April-2024 range, a
+2023 date range), received an empty result *caused by its own invention*, and
+reported "no results found". That is indistinguishable from a truthful answer.
+It also fabricated a £1,490 total by summing the 10 visible rows instead of
+reading `total_matching`, and mislabelled retail orders as wholesale.
+
+Two regressions of already-fixed bugs reappeared at 15 tools: the
+"top customers by spend" refusal (fixed 2026-08-08) and summing visible rows
+instead of reading `total_matching` (fixed 2026-08-14). **A fix verified at 3
+tools does not stay verified at 15** — re-run this bake-off after any change to
+the tool set.
+
+---
+
+## 10. Changelog
 
 Append one line per completed task. Newest last. Keep it to one line each.
 
@@ -329,3 +454,7 @@ Append one line per completed task. Newest last. Keep it to one line each.
 - 2026-08-19 — Phase 2 step 5: deleted the non-streaming `POST /chat` route and `assistantApi.chat`; SSE is now the only chat path. `describeFailure()` returns just the event payload (the `httpStatus` half died with the JSON route). Phase 2 is code-complete — but **verified only through a node harness against the adapter**; nobody has run the browser path end to end.
 - 2026-08-19 — First browser test of streaming found two bugs. (1) **Pressing Stop before the first token bricked the conversation.** The empty placeholder assistant message stayed in state, was sent as history on the next question, and the server rejected it — so every later question failed with "each message needs non-empty string content" while the UI just showed unanswered questions. The panel now drops a trailing empty assistant turn and filters empty turns out of history. Same lesson as 2026-08-14: a validation rule aimed at user input must not be able to lock the user out. (2) **The assistant refused to list records** ("individual records cannot be listed here") — the 2026-08-14 anti-raw-JSON rule said "if you find yourself about to paste a list of records, stop and report the count instead", which the model read as a ban on listing at all. Reworded to constrain *format* (no JSON, rewrite as your own lines) while explicitly requiring it to list when asked. Verified on ollama: listing works, and the count answer is unchanged.
 - 2026-08-07 — Claude API is paid, so added a pluggable provider layer. `tools.js` is now provider-neutral; adapters live in `assistant/providers/`. One OpenAI-compatible adapter covers Groq/Cerebras/OpenRouter/Ollama/OpenAI; Anthropic keeps its own. Default switched to `groq` (free). Weaker models are handled defensively — unknown tool names and malformed JSON args are fed back as tool errors so the model self-corrects instead of 500ing.
+- 2026-08-19 — **Conversation persistence dropped from phase 3 by decision.** Chat history stays in React state only and is lost on reload/logout/tab close; no `assistant_conversations` table, no load/resume UI. Phase 3 is now tool coverage alone. Note this does **not** discharge hard rule 4.6 (audited PII access) — that is a separate, still-open question, and the current console log records tool names but not the question or the answer.
+- 2026-08-19 — **Phase 3 tool coverage built: 3 tools → 15.** Added products, product sales, payments, newsletter, address-change requests, affiliates, promos, store credit, and four wholesale tools. Every statement was executed against the live DB under both `domain=null` and `domain=1` before being accepted. Three doc corrections fell out of that: (1) **`products` DOES have `domain_id`** — this doc said it did not; the column exists but is NULL on every live row, so a naive `domain_id = $1` returns **zero products** whenever a store is selected, and the tool must read NULL as "global"; (2) `domains.name` is actually `domain_name`; (3) `newsletter_subscribers.consent` is smallint 0/1, not boolean. Live testing also caught a Postgres "could not determine data type of parameter" error in `query_credits` — a query was passed parameters it never referenced. The system prompt's closing line still told the model it had **no** tools for wholesale/affiliates/inventory/newsletter, which would have caused confident false refusals against the new tools; removed. Lesson repeated from 2026-08-08: the schema dump is not the database — `schema.sql` and this doc both disagreed with live data, and only running the SQL settled it.
+- 2026-08-19 — **Phase 3 bake-off FAILED: 2/12 on ollama/`qwen3:14b` with 15 tools.** A controlled A/B (same prompt, same model, same questions, only the tool count varying) scored **3/3 at 3 tools and 0/3 at 15**, so the cause is tool-set size, not the prompt — correctness holds to ~10 tools and collapses between 10 and 15. Worst failure was not refusal but **invented tool arguments**: the model made up an order code, an email and a date range, got an empty result caused by its own fabricated filter, and reported "no results found" — indistinguishable from a true answer. Two previously-fixed bugs also regressed (the 2026-08-08 top-customers refusal, the 2026-08-14 sum-the-visible-rows error), proving a fix verified at 3 tools does not stay verified at 15. The 12 new tools and their SQL are correct and stay in the codebase; what needs deciding is how many are exposed at once. Full detail and transcripts in §9.
+- 2026-08-19 — **Mitigated the 15-tool collapse.** Added an `ASSISTANT_TOOLS` allowlist (`selectEnabledTools` in `tools.js`): all 15 tools stay in the code, 10 are exposed by default, `all` or an explicit list overrides, unknown names are logged and ignored, and an allowlist matching nothing falls back to the default rather than leaving the model with no tools (which fails as confident hallucination, not an error). Also hardened all 18 date parameters and the prompt against invented arguments — **fabricated dates went 3/12 → 0/12**, and out-of-scope questions now get an honest "I have no tool for that" instead of made-up data. **Not a full fix:** repeated runs (3× per question) show "how many orders in total?" is still a coin flip at BOTH 6 and 10 tools — the model summarises the 10 visible rows instead of reading `total_matching`, the same bug marked fixed on 2026-08-14. An isolation test also produced OK, WRONG and REFUSED for the *same* configuration across repeat runs, so **single-run bake-offs prove nothing** — run every question at least 3× from now on. Next untried lever is a stronger local model. Transcripts: `documentation/bakeoff-2026-08-19/`.

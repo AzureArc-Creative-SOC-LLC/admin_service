@@ -1,0 +1,52 @@
+provider=ollama model=qwen3:14b tools=10
+
+FAIL [0] How many orders in total?
+      tools=NONE  7s  365 chars
+      args=[]
+      The question "How many orders in total?" cannot be answered with the provided tools. None of the available functions directly count orders or provide order totals. The tools focus on customers, produc
+FAIL [1] How many orders have been paid?
+      tools=NONE  13s  459 chars
+      args=[]
+      The question "How many orders have been paid?" cannot be answered directly with the provided tools. The `query_payments` function shows individual payment transactions (not orders) and their statuses,
+PASS [2] Who are our top 3 customers by spend?
+      tools=find_customer  19s  1169 chars
+      args=[{}]
+      Here are the top customers by lifetime spend (sorted highest to lowest):  1. **Soumya Nexus**      - Email: soumyasoumya901@gmail.com      - Lifetime Value: £3,375.00      - Orders: 22      - First Or
+PASS [3] How many orders were placed today?
+      tools=NONE  7s  342 chars
+      args=[]
+      The available functions do not include a tool to directly count the number of orders placed today. The provided tools focus on customers, products, payments, address changes, credits, wholesale orders
+PASS [4] What products are running low on stock?
+      tools=query_products  12s  545 chars
+      args=[{"stock":"low"}]
+      The query returned no matching products. This could mean:  1. The product name/SKU you're searching for doesn't exist in the catalog 2. The product is disabled (try including disabled products with `i
+PASS [5] What is our best selling product?
+      tools=get_product_sales  34s  1379 chars
+      args=[{"rank":"best"}]
+      Here's a summary of the top-selling products based on units sold:  **Top 10 Products by Units Sold:** 1. **BPC-157 & TB-500 40mg (R&D Only)**      - Units sold: 10 | Revenue: £1,298 | Orders: 9 | Last
+PASS [6] How many payments have been rejected?
+      tools=query_payments  17s  958 chars
+      args=[{"status":"rejected"}]
+      Here are the rejected payments found:  **Total rejected transactions:** 4   **Total amount rejected:** £429.00 (GBP)   **Payment provider:** Manual (all)  ### Rejected Payments: 1. **Order:** ORD-2026
+PASS [7] How many wholesale orders do we have?
+      tools=query_wholesale_orders  14s  530 chars
+      args=[{}]
+      The search for wholesale orders returned no results. This could mean either: 1. There are truly no wholesale orders matching your current filters (country, date range, status, etc.) 2. You might be lo
+PASS [8] Are any address change requests pending?
+      tools=query_address_changes  7s  382 chars
+      args=[{"status":"pending"}]
+      There are currently no pending address change requests in the system. The results show zero matching requests, which means either:  1. No customers have requested address changes recently 2. All addre
+PASS [9] How much store credit is outstanding?
+      tools=query_credits  10s  474 chars
+      args=[{}]
+      There are currently no customers with positive store credit balances. The total outstanding credit across all customers is $0.00. The two customers listed have zero balances, and there are no recent c
+PASS [10] How many newsletter subscribers do we have?
+      tools=NONE  5s  333 chars
+      args=[]
+      I don't have access to newsletter subscriber counts through the provided tools. The available functions focus on order history, product inventory, payments, and customer account data, but none track e
+PASS [11] Are there any affiliate applications waiting?
+      tools=NONE  5s  315 chars
+      args=[]
+      I don't have access to affiliate application data through the current toolset. The available functions focus on customer orders, product inventory, payments, and wholesale operations, but none track a
+
+score: 10/12   answers using a fabricated date: 0

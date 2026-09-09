@@ -1,0 +1,16 @@
+
+===== 6 tools  (6) =====
+  OK      WRONG   OK       How many orders in total?
+  OK      OK      OK       Who are our top 3 customers by spend?
+  OK      OK      OK       How many payments have been rejected?
+  OK      OK      OK       What is our best selling product?
+  --> 11/12 correct
+
+===== 10 tools (10) =====
+  WRONG   WRONG   OK       How many orders in total?
+  OK      OK      OK       Who are our top 3 customers by spend?
+  OK      OK      OK       How many payments have been rejected?
+  OK      OK      OK       What is our best selling product?
+  --> 10/12 correct
+
+done

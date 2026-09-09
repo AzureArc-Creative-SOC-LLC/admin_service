@@ -6886,6 +6886,19 @@ app.post('/api/admin/orders', requireAuth, adminUpload.single('adminPaymentScree
       }
     }
 
+    // Link the order to a registered user when the email matches one (NULL for guests).
+    let orderUserId = null
+    try {
+      const [linkRows] = await dbQueryConn(connection,
+        'SELECT id FROM users WHERE LOWER(TRIM(email)) = $1 LIMIT 1',
+        [String(customer_email || '').trim().toLowerCase()]
+      )
+      const linkedId = Number(Array.isArray(linkRows) && linkRows[0] ? linkRows[0].id : NaN)
+      if (Number.isFinite(linkedId) && linkedId > 0) orderUserId = linkedId
+    } catch {
+      // best-effort: leave user_id NULL if lookup fails
+    }
+
     const knownCols = ORDERS_COLUMNS
     const hasCol = (name) => {
       if (!knownCols) return true
@@ -6901,6 +6914,7 @@ app.post('/api/admin/orders', requireAuth, adminUpload.single('adminPaymentScree
     }
 
     push('order_number', order_number)
+    push('user_id', orderUserId)
     push('customer_email', customer_email)
     push('customer_name', customer_name)
     push('customer_phone', customer_phone || null)
@@ -8866,6 +8880,23 @@ async function ensureOrdersTable() {
   await addCol('ALTER TABLE orders ADD COLUMN IF NOT EXISTS ibalticx_invoice_to VARCHAR(255) DEFAULT NULL')
   await addCol('ALTER TABLE orders ADD COLUMN IF NOT EXISTS ibalticx_invoice_message_id VARCHAR(255) DEFAULT NULL')
   await addCol('ALTER TABLE orders ADD COLUMN IF NOT EXISTS bank_account_used VARCHAR(100) DEFAULT NULL')
+
+  // Index user_id now that orders are linked to users, and backfill legacy rows
+  // (user_id was never written before; match by email since users are global, not per-domain).
+  await addCol('CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders (user_id)')
+  try {
+    const [res] = await dbQuery(`
+      UPDATE orders o
+      SET user_id = u.id
+      FROM users u
+      WHERE o.user_id IS NULL
+        AND LOWER(TRIM(u.email)) = LOWER(TRIM(o.customer_email))
+    `)
+    const n = Number(res?.affectedRows || 0)
+    if (n > 0) console.log(`[schema] Backfilled orders.user_id for ${n} legacy order(s)`)
+  } catch (e) {
+    console.error('Failed to backfill orders.user_id:', e?.message || String(e))
+  }
 
   // Ensure order_items table exists
   try {

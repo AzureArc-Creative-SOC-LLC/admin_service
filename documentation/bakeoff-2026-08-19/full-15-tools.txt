@@ -1,0 +1,76 @@
+provider=ollama model=qwen3:14b configured=true
+
+
+[0] Q: How many orders in total?
+    want tool: query_orders   got: query_orders
+    expect:    43
+    ANSWER:    Here's a summary of the returned orders data:  **Total matching orders:** 43 (truncated to 10 results) **Status distribution:** All orders are either "pending" (10) or "processing" (1) **Key patterns:** - Repeated customer: `nooshin.nexus@gmail.com` (6 orders) - Shipping countries: Mostly United Kingdom (7/10), 1 to United States, 2 with unclear "vcb" country - Payment methods: 5 orders show "[object Object]" (likely corrupted data) - Total value: £1,490.00 GBP (assuming all orders are at listed totals)  Would you like me to: 1. Highlight any specific order details? 2. Check for data anomalies (like "[object Object]" entries)? 3. Help analyze the truncated results further?
+    15s  in=4100 out=767
+
+[1] Q: How many orders have been paid?
+    want tool: get_revenue_stats|query_orders   got: query_payments
+    expect:    2
+    ANSWER:    There are currently **0 payments pending** in the system.   This means all payment attempts (including retries) have either succeeded or been rejected, and there are no ongoing pending transactions. Let me know if you'd like to explore other payment statuses or filters!
+    25s  in=4100 out=1335
+
+[2] Q: Who are our top 3 customers by spend?
+    want tool: find_customer   got: NONE
+    expect:    soumyasoumya901
+    ANSWER:    There is no function available in the provided tools that can directly retrieve or calculate the top customers by spend. The available functions focus on orders, payments, newsletter subscribers, address changes, affiliates, promo codes, store credit, wholesale orders, inventory, production, and wholesale inquiries, but none aggregate customer spend data. To answer this question, a different tool or database query would be required.
+    6s  in=2050 out=300
+
+[3] Q: How many orders were placed today?
+    want tool: query_orders   got: query_orders,query_address_changes
+    expect:    0
+    ANSWER:    There are currently **no pending address change requests** waiting for approval. The system shows zero matching requests in the queue.   If you were expecting address change requests, they may either: 1. Not have been submitted yet 2. Have already been processed (approved/rejected) 3. Be associated with a specific customer/order that needs to be searched for  Would you like me to check for address changes related to a specific customer email or order number?
+    33s  in=6150 out=1576
+
+[4] Q: What products are running low on stock?
+    want tool: query_products   got: NONE
+    expect:    none/0
+    ANSWER:    The available tools do not include a function for checking retail product stock levels. The `query_products` tool is for querying product details (like prices and categories) but does not provide stock level information. For wholesale stock levels, you could use `get_wholesale_inventory`, but this is unrelated to retail products.   No function is available to directly answer "What products are running low on stock?" in the retail context.
+    9s  in=2050 out=459
+
+[5] Q: What is our best selling product?
+    want tool: get_product_sales   got: query_orders
+    expect:    BPC-157
+    ANSWER:    Here's a summary of the wholesale orders data:  **Overview** - Total matching orders: 43 (truncated to 10 results) - All orders are in "pending" status with "pending" payment status - Total value ranges from £90 to £358 (GBP) - Most orders shipped to United Kingdom, with 1 to United States - Notable repeated customer: nooshin.nexus@gmail.com (5 orders)  **Key Observations** 1. Inconsistent shipping country entries ("vcb" appears twice) 2. Payment method field contains [object Object] placeholders (likely data display issues) 3. Multiple orders with similar customer names but different email addresses 4. Order totals show varying amounts despite similar product counts  Would you like me to focus on any specific aspect of these orders?
+    21s  in=4100 out=1147
+
+[6] Q: How many payments have been rejected?
+    want tool: query_payments   got: query_payments
+    expect:    4
+    ANSWER:    Here's a summary of the manual payment attempts that were rejected:  **Total rejected payments:** 4 transactions (across 4 orders) **Total amount:** £429.00 GBP  **Details:** 1. `ORD-20260804-115736686-8443B3` - £129.00 on 2026-08-04 2. `ORD-20260803-133016792-B85E9C` - £100.00 on 2026-08-03 3. `ORD-20260803-132622555-78B4D3` - £100.00 on 2026-08-03 4. `ORD-20260803-120047161-D3AFD0` - £100.00 on 2026-08-03  Note: The system counts individual payment attempts (transactions) rather than unique orders. Each order may have multiple payment attempts shown here. The "rejected" status indicates these payments were manually processed but failed. Would you like me to check why these were rejected or look for other payment statuses?
+    14s  in=4100 out=701
+
+[7] Q: How many newsletter subscribers do we have?
+    want tool: query_newsletter   got: query_newsletter
+    expect:    0
+    ANSWER:    The query for newsletter subscribers returned no matches. This could mean: 1. No subscribers exist in the system 2. The date range (2023-01-01 to 2023-12-31) doesn't include any signups 3. No subscribers matched the search criteria  Would you like to: 1. Check a different date range? 2. Search by specific email or source? 3. Verify if the newsletter system is properly configured?
+    14s  in=4100 out=535
+
+[8] Q: Are there any affiliate applications waiting?
+    want tool: query_affiliates   got: query_affiliates
+    expect:    0/none
+    ANSWER:    The query_affiliates function returned no active affiliates or pending applications. This suggests the affiliate program may not have any participants yet, or the search criteria (if any) didn't match existing records. The note clarifies that referral counts come from promo_redemptions linked to affiliates - so even if affiliates exist, they'd need to have generated referrals through promo codes for those counts to appear. Would you like to check promo code usage or create a new affiliate application?
+    11s  in=4100 out=543
+
+[9] Q: How many wholesale orders do we have?
+    want tool: query_wholesale_orders   got: query_wholesale_orders
+    expect:    0
+    ANSWER:    The search for wholesale orders with the specified criteria (UK, email test@example.com, order code WH-20240401-001, pending status, April 2024) returned no results. This could mean:  1. No orders match all those exact filters 2. The order code might be incorrect 3. The email isn't associated with any wholesale orders  Would you like to try broader search terms? Note that wholesale and retail orders are entirely separate systems.
+    19s  in=4100 out=1031
+
+[10] Q: How many people are on the wholesale team?
+    want tool: query_wholesale_production   got: query_wholesale_production
+    expect:    10
+    ANSWER:    The wholesale production team currently has no active allocations or work assigned. All team members (Team Member 1-10) show 0 allocations and 0 units assigned. The note clarifies that team members are shared across storefronts and that allocations are scoped through specific wholesale orders. Since there are no recent allocations listed, it appears no wholesale production work is currently in progress. Would you like me to check for pending wholesale orders that might need assignment?
+    16s  in=4100 out=775
+
+[11] Q: Are any address change requests pending?
+    want tool: query_address_changes   got: query_address_changes
+    expect:    0/none
+    ANSWER:    There are no pending address change requests matching your criteria. The system shows zero requests in the queue. Would you like to:  1. Check address changes for a specific customer/order? 2. Review recently submitted address changes (even if not pending)? 3. Check if there's a possibility of a system error?  The query parameters used would help determine next steps.
+    14s  in=4100 out=732
+
+done

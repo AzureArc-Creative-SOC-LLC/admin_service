@@ -4,7 +4,7 @@
 // conversation; the model calls read-only tools against Postgres and the answer
 // is streamed back as SSE. See documentation/AI_ASSISTANT.md.
 
-import { buildTools } from './tools.js'
+import { buildTools, selectEnabledTools } from './tools.js'
 import { buildSystemPrompt } from './prompt.js'
 import { createProvider } from './providers/index.js'
 
@@ -98,6 +98,24 @@ export function registerAssistant(app, deps) {
   const { requireAuth, dbQuery, resolveAdminDomainFilter, resolveDomainNameById } = deps
 
   const provider = createProvider()
+
+  // Resolve the allowlist once at boot so a typo in ASSISTANT_TOOLS is visible
+  // in the logs immediately, rather than silently narrowing what the assistant
+  // can answer. `dbQuery` is irrelevant here — only the names are read.
+  const toolPlan = selectEnabledTools(buildTools({ dbQuery, domainId: null }))
+  if (toolPlan.unknown.length) {
+    console.warn(`[assistant] ASSISTANT_TOOLS names not recognised, ignored: ${toolPlan.unknown.join(', ')}`)
+  }
+  console.log(
+    `[assistant] tools=${toolPlan.active.length} (${toolPlan.mode}): ${toolPlan.active.join(', ')}`,
+  )
+  if (toolPlan.active.length > 10) {
+    console.warn(
+      '[assistant] more than 10 tools are exposed. Selection accuracy collapsed at 15 on qwen3:14b ' +
+      '(documentation/AI_ASSISTANT.md §9) — re-run the bake-off before trusting answers.',
+    )
+  }
+
   if (provider.configured) {
     console.log(`[assistant] provider=${provider.id} model=${provider.model}`)
   } else {
@@ -109,6 +127,8 @@ export function registerAssistant(app, deps) {
       configured: provider.configured,
       provider: provider.id,
       model: provider.model,
+      tools: toolPlan.active,
+      toolSource: toolPlan.mode,
       ...(provider.configured ? {} : { hint: provider.hint }),
     })
   })
@@ -165,7 +185,7 @@ export function registerAssistant(app, deps) {
       const { reply, toolsUsed, usage, exhausted } = await provider.run({
         system: buildSystemPrompt({ domainName }),
         messages,
-        tools: buildTools({ dbQuery, domainId }),
+        tools: selectEnabledTools(buildTools({ dbQuery, domainId })).tools,
         maxIterations: MAX_ITERATIONS,
         // The bridge: every adapter event becomes an SSE event of the same name.
         onEvent: (ev) => { if (!aborted) send(ev.type, ev) },

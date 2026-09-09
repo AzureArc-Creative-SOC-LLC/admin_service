@@ -1,0 +1,44 @@
+
+===== 6 tools (6 actually bound) =====
+FAIL | How many orders in total?
+       tools=query_orders (23s, 1065 chars)
+       Here's a summary of key insights from the data and potential next steps:  **Observations:** 1. **Pending Orders:** 10 orders are pending payment (status: "pending" and payment_status: "pending"), tota
+PASS | Who are our top 3 customers by spend?
+       tools=find_customer (19s, 1456 chars)
+       Here are the top customers ranked by lifetime spend (highest first):  1. **Soumya Nexus**      - Email: soumyasoumya901@gmail.com      - Orders: 22      - Lifetime Value: £3,375.00 GBP      - First Or
+PASS | How many orders have been paid?
+       tools=query_orders (16s, 24 chars)
+       2 orders have been paid.
+PASS | What is our best selling product?
+       tools=get_product_sales (16s, 747 chars)
+       Here's a summary of the top-selling products based on units sold:  1. **BPC-157 & TB-500 40mg (R&D Only)**      - Units sold: 10      - Revenue: £1,298.00    2. **Retatrutide 20mg (R&D Only)**      - 
+
+===== 8 tools (8 actually bound) =====
+PASS | How many orders in total?
+       tools=query_orders (21s, 1056 chars)
+       Here's a summary of the order data retrieved:  **Total Matching Orders:** 43 (only first 10 shown here)  **Key Observations:** 1. **Order Statuses:**    - 9 orders are "pending"    - 1 order ("ORD-202
+PASS | Who are our top 3 customers by spend?
+       tools=find_customer (24s, 1323 chars)
+       Here are the top customers sorted by lifetime spend (highest first):  1. **Soumya Nexus**      - Email: soumyasoumya901@gmail.com      - Lifetime Value: £3,375.00      - Orders: 22 (all unpaid)      -
+PASS | How many orders have been paid?
+       tools=query_orders (21s, 630 chars)
+       The two orders from customer **nooshin.nexus@gmail.com** have a **payment_status** of "received" (indicating successful payment) but a **status** of "pending" (fulfillment not yet completed). Here's t
+PASS | What is our best selling product?
+       tools=get_product_sales (23s, 1242 chars)
+       Here's a summary of the top-selling products based on units sold and revenue:  **Top-Selling Products (All Time)**   1. **BPC-157 & TB-500 40mg (R&D Only)**      - SKU: `bpc-157-tb-500`      - Units S
+
+===== 10 tools (10 actually bound) =====
+PASS | How many orders in total?
+       tools=get_revenue_stats (26s, 789 chars)
+       The data shows 43 orders with a total value of £6,326, but only 2 of those orders have been paid (confirmed payments). This means:  1. **Order Value** (£6,326) represents all orders placed regardless 
+PASS | Who are our top 3 customers by spend?
+       tools=find_customer (23s, 1536 chars)
+       Here are the top customers by lifetime spend (sorted highest first):  1. **Soumya Nexus**      - Email: soumyasoumya901@gmail.com      - Lifetime Value: £3,375.00      - Orders: 22      - First/Last O
+PASS | How many orders have been paid?
+       tools=get_revenue_stats (35s, 842 chars)
+       The data shows:  1. **Order Value (GBP £6,326)**:      - 43 orders placed "all time" (regardless of payment status).      - Average order value: £147.12.      - Only 2 of these orders are marked as "p
+PASS | What is our best selling product?
+       tools=get_product_sales (22s, 1723 chars)
+       Here's the ranked product list based on your query for "most units sold first" across all time:  **Top 10 Best-Selling Products:** 1. **BPC-157 & TB-500 40mg (R&D Only)**      - Units sold: 10 | Reven
+
+done
