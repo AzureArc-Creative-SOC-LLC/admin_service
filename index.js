@@ -301,6 +301,15 @@ async function resolveBrandFromForDomain(domainName) {
   }
 }
 
+// Everything an email needs to be sent as a given storefront: its domain plus
+// the brand's website/from/fromName. Empty object when the domain is unknown.
+async function brandEmailFieldsForDomainId(domainId) {
+  const domainName = await resolveDomainNameById(domainId)
+  if (!domainName) return {}
+  const brand = await resolveBrandFromForDomain(domainName)
+  return { domain: domainName, website: brand?.website, from: brand?.from, fromName: brand?.fromName }
+}
+
 // Short-lived cache for read-heavy dashboard aggregate endpoints. Dashboard
 // analytics don't need per-second freshness, and this avoids re-running
 // expensive aggregate queries every time an admin flips the domain/range filter.
@@ -978,7 +987,7 @@ app.post('/api/admin/order/:id/refund', requireAuth, async (req, res) => {
     dbQueryConn(connection, 'BEGIN')
 
     const [orderRows] = await dbQueryConn(connection, 
-      'SELECT id, order_number, customer_email, customer_name, total, currency, payment_status FROM orders WHERE id = $1 LIMIT 1 FOR UPDATE',
+      'SELECT id, order_number, customer_email, customer_name, total, currency, payment_status, domain_id FROM orders WHERE id = $1 LIMIT 1 FOR UPDATE',
       [id]
     )
     const order = Array.isArray(orderRows) && orderRows[0] ? orderRows[0] : null
@@ -1052,9 +1061,13 @@ app.post('/api/admin/order/:id/refund', requireAuth, async (req, res) => {
     try {
       const to = String(order.customer_email || '').trim()
       if (to && to.includes('@')) {
-        const publicBase = env('PUBLIC_API_BASE_URL', env('PUBLIC_BASE_URL', '')).replace(/\/$/, '')
+        const brandFields = await brandEmailFieldsForDomainId(order.domain_id)
+        const publicBase = brandFields.domain
+          ? `https://${brandFields.domain}`
+          : env('PUBLIC_API_BASE_URL', env('PUBLIC_BASE_URL', '')).replace(/\/$/, '')
         const trackUrl = `${publicBase}/track-order`
         await sendRefundInitiatedEmail(to, {
+          ...brandFields,
           customerName: String(order.customer_name || '').trim() || 'Customer',
           orderNumber: String(order.order_number || '').trim(),
           amount: refundAmount,
@@ -7990,6 +8003,7 @@ app.put('/api/admin/order/:id/status', requireAuth, async (req, res) => {
           shippingState: String(beforeOrder?.shipping_state || '').trim(),
           shippingZip: String(beforeOrder?.shipping_zip || '').trim(),
           shippingCountry: String(beforeOrder?.shipping_country || '').trim(),
+          ...(await brandEmailFieldsForDomainId(beforeOrder?.domain_id)),
         }
         try {
           console.log('[status_update] sending out_for_delivery email', {
@@ -9217,6 +9231,7 @@ async function ensureNewsletterSubscribersTable() {
         ip_address VARCHAR(45),
         user_agent VARCHAR(512),
         is_winner SMALLINT NOT NULL DEFAULT 0,
+        unsubscribed_at TIMESTAMP NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         CONSTRAINT uniq_newsletter_email_source UNIQUE (email, source)
@@ -9227,6 +9242,12 @@ async function ensureNewsletterSubscribersTable() {
     if (!msg.toLowerCase().includes('already exists')) {
       console.error('Failed to ensure newsletter_subscribers table:', msg)
     }
+  }
+  // Set by user-order-service when a subscriber follows their unsubscribe link.
+  try {
+    await dbQuery('ALTER TABLE newsletter_subscribers ADD COLUMN IF NOT EXISTS unsubscribed_at TIMESTAMP NULL')
+  } catch (e) {
+    console.error('Failed to ensure newsletter_subscribers.unsubscribed_at column:', e?.message || e)
   }
 }
 
@@ -9260,6 +9281,9 @@ app.get('/api/admin/newsletter', requireAuth, async (req, res) => {
       params.push(domainId)
       where.push(`domain_id = $${params.length}`)
     }
+    // Unsubscribed rows are hidden unless explicitly requested
+    const includeUnsubscribed = ['1', 'true', 'yes'].includes(String(req.query.include_unsubscribed || '').toLowerCase())
+    if (!includeUnsubscribed) where.push('unsubscribed_at IS NULL')
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
     const [countRows] = await dbQuery(
@@ -9269,7 +9293,7 @@ app.get('/api/admin/newsletter', requireAuth, async (req, res) => {
     const total = Number(countRows?.[0]?.total || 0)
 
     const [rows] = await dbQuery(
-      `SELECT id, email, consent, source, ip_address, user_agent, is_winner, created_at
+      `SELECT id, email, consent, source, ip_address, user_agent, is_winner, unsubscribed_at, created_at
        FROM newsletter_subscribers
        ${whereClause}
        ORDER BY created_at DESC
@@ -9312,7 +9336,7 @@ app.put('/api/admin/newsletter/:id/winner', requireAuth, async (req, res) => {
 
     // Read prior state so we only email on the false → true transition
     const [priorRows] = await dbQuery(
-      'SELECT email, is_winner FROM newsletter_subscribers WHERE id = $1',
+      'SELECT email, is_winner, domain_id FROM newsletter_subscribers WHERE id = $1',
       [id]
     )
     const prior = Array.isArray(priorRows) && priorRows[0] ? priorRows[0] : null
@@ -9329,7 +9353,7 @@ app.put('/api/admin/newsletter/:id/winner', requireAuth, async (req, res) => {
     if (isWinner && !wasWinner && prior.email) {
       ;(async () => {
         try {
-          await sendNewsletterWinnerEmail(prior.email, { productName: 'Retatrutide 40mg pen' })
+          await sendNewsletterWinnerEmail(prior.email, { productName: 'Retatrutide 40mg pen', ...(await brandEmailFieldsForDomainId(prior.domain_id)) })
         } catch (mailErr) {
           console.error('[newsletter] winner email failed:', mailErr?.message || mailErr)
         }
@@ -9357,10 +9381,14 @@ app.get('/api/admin/newsletter/export.csv', requireAuth, async (req, res) => {
     if (to) { where.push('created_at <= $1'); params.push(to.length === 10 ? `${to} 23:59:59` : to) }
     const domainId = await resolveAdminDomainFilter(req)
     if (domainId != null) { params.push(domainId); where.push(`domain_id = $${params.length}`) }
+    // Unsubscribed rows are excluded from exports unless explicitly requested — the
+    // CSV is what gets loaded into mailing tools, so it must respect opt-outs.
+    const includeUnsubscribed = ['1', 'true', 'yes'].includes(String(req.query.include_unsubscribed || '').toLowerCase())
+    if (!includeUnsubscribed) where.push('unsubscribed_at IS NULL')
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
     const [rows] = await dbQuery(
-      `SELECT id, email, consent, source, is_winner, created_at
+      `SELECT id, email, consent, source, is_winner, unsubscribed_at, created_at
        FROM newsletter_subscribers ${whereClause}
        ORDER BY created_at DESC`,
       params
@@ -9371,16 +9399,18 @@ app.get('/api/admin/newsletter/export.csv', requireAuth, async (req, res) => {
       if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`
       return s
     }
-    const header = ['id', 'email', 'consent', 'source', 'is_winner', 'created_at']
+    const iso = (d) => (d instanceof Date ? d.toISOString() : (d || ''))
+    const header = ['id', 'email', 'consent', 'source', 'is_winner', 'unsubscribed_at', 'created_at']
     const lines = [header.join(',')]
 for (const r of rows) {
   lines.push([
     r.id,
     r.email,
-    r.consent ? '1' : '0', 
+    r.consent ? '1' : '0',
     r.source,
-    r.is_winner ? '1' : '0', 
-    r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at, // Fixed $3
+    r.is_winner ? '1' : '0',
+    iso(r.unsubscribed_at),
+    iso(r.created_at),
   ].map(escape).join(','))
 }
 

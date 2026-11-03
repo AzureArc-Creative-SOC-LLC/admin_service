@@ -1,8 +1,8 @@
-import nodemailer from 'nodemailer';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {getBrandConfig} from './brand-config.js';
+import { sendViaTurboSmtp } from './turbosmtp.js';
 
 const env = (name, fallback = '') => {
   const v = process.env[name];
@@ -26,8 +26,8 @@ const getStoreDomain = (data) => {
       if (cleaned) return cleaned;
     }
   }
-  const fallbackEmail = env('EMAIL_FROM_EMAIL', env('MAILJET_SENDER_EMAIL', 'info@alluvi.org'));
-  return String(fallbackEmail).split('@')[1] || 'alluvi.org';
+  const fallbackEmail = env('EMAIL_FROM_EMAIL', '');
+  return String(fallbackEmail).split('@')[1] || '';
 };
 
 // Friendly brand name to *display* (e.g. "Zyra Healthcare"), as opposed to
@@ -47,158 +47,11 @@ const getStoreName = (domain, data) => {
   return domain;
 };
 
-const sendEmailViaResend = async ({ to, subject, html, text, headers = {}, from, fromName: fromNameOverride }) => {
-  const apiKey = env('RESEND_API_KEY');
-  if (!apiKey) return { success: false, error: 'RESEND_API_KEY missing' };
-
-  const fromEmail = from || env('EMAIL_FROM_EMAIL', env('MAILJET_SENDER_EMAIL', 'info@alluvi.org'));
-  const fromDomain = fromEmail.split('@')[1] || 'alluvi.org';
-  const fromNameRaw = fromNameOverride || env('EMAIL_FROM_NAME', env('MAILJET_SENDER_NAME', fromDomain));
-  const fromName = /klyme/i.test(fromNameRaw) ? fromDomain : fromNameRaw;
-
-  const payload = {
-    from: `${fromName} <${fromEmail}>`,
-    to: [to],
-    subject,
-    html,
-    ...(text ? { text } : {}),
-    ...(headers && typeof headers === 'object' && Object.keys(headers).length ? { headers } : {}),
-  };
-
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = data?.message || data?.error || `Resend send failed (${res.status})`;
-    return { success: false, error: msg, details: data };
-  }
-
-  const messageId = data?.id || data?.data?.id;
-  return { success: true, messageId };
-};
-
-const sendEmailViaMailjet = async ({ to, subject, html, text, inlineAttachments = [], headers = {} }) => {
-  const apiKey = env('MAILJET_API_KEY');
-  const secretKey = env('MAILJET_SECRET_KEY');
-  const fromEmail = env('MAILJET_SENDER_EMAIL');
-  const fromDomain = (fromEmail || '').split('@')[1] || 'alluvi.org';
-  const fromNameRaw = env('MAILJET_SENDER_NAME', fromDomain);
-  const fromName = /klyme/i.test(fromNameRaw) ? fromDomain : fromNameRaw;
-
-  if (!apiKey || !secretKey || !fromEmail) {
-    return { success: false, error: 'MAILJET credentials missing' };
-  }
-
-  const payload = {
-    Messages: [
-      {
-        From: { Email: fromEmail, Name: fromName },
-        To: [{ Email: to }],
-        Subject: subject,
-        HTMLPart: html,
-        ...(text ? { TextPart: text } : {}),
-        ...(headers && typeof headers === 'object' && Object.keys(headers).length ? { Headers: headers } : {}),
-        ...(Array.isArray(inlineAttachments) && inlineAttachments.length ? { InlinedAttachments: inlineAttachments } : {})
-      }
-    ]
-  };
-
-  const auth = Buffer.from(`${apiKey}:${secretKey}`).toString('base64');
-  const res = await fetch('https://api.mailjet.com/v3.1/send', {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${auth}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = data?.ErrorMessage || data?.error || `Mailjet send failed (${res.status})`;
-    return { success: false, error: msg, details: data };
-  }
-
-  const messageId = data?.Messages?.[0]?.To?.[0]?.MessageID || data?.Messages?.[0]?.MessageID;
-  return { success: true, messageId };
-};
-
-const createTransporter = () => {
-  return nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 587,
-    secure: false,
-    auth: {
-      user: process.env.EMAIL_USER || 'your-email@gmail.com',
-      pass: process.env.EMAIL_PASS || 'your-app-password'
-    },
-    tls: {
-      rejectUnauthorized: false
-    },
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 10000
-  });
-};
-
-const ALLUVI_LOGO_CID = 'alluvilogo.png';
-
-const resolveAlluviLogoPath = () => {
-  try {
-    const __filename = fileURLToPath(import.meta.url);
-    const __dirname = path.dirname(__filename);
-    return path.join(__dirname, '..', '..', 'public', 'images', 'Alluvi-logo-2-white.png');
-  } catch {
-    return '';
-  }
-};
-
-const hasAlluviLogoFile = () => {
-  try {
-    const p = resolveAlluviLogoPath();
-    return !!p && fs.existsSync(p);
-  } catch {
-    return false;
-  }
-};
-
-const getAlluviLogoInlineAttachmentForMailjet = () => {
-  try {
-    const filePath = resolveAlluviLogoPath();
-    if (!filePath || !fs.existsSync(filePath)) return null;
-    const buf = fs.readFileSync(filePath);
-    return {
-      ContentType: 'image/png',
-      Filename: 'alluvilogo.png',
-      Base64Content: buf.toString('base64'),
-      ContentID: ALLUVI_LOGO_CID,
-    };
-  } catch {
-    return null;
-  }
-};
-
-const getAlluviLogoInlineAttachmentForNodemailer = () => {
-  try {
-    const filePath = resolveAlluviLogoPath();
-    if (!filePath || !fs.existsSync(filePath)) return null;
-    return {
-      filename: 'alluvilogo.png',
-      path: filePath,
-      cid: ALLUVI_LOGO_CID,
-      contentType: 'image/png',
-    };
-  } catch {
-    return null;
-  }
-};
+// Storefront emails use a text header; the Alluvi logo must never be attached
+// or referenced. These stay as no-ops so the wrappers below need no changes.
+const ALLUVI_LOGO_CID = 'storelogo';
+const hasAlluviLogoFile = () => false;
+const getAlluviLogoInlineAttachmentForNodemailer = () => null;
 
 const HAS_SUBSCRIPTION_PACKS = [
   {
@@ -385,7 +238,7 @@ export const buildIbalticxMaskedItems = ({ orderItems = [], promoDiscountPercent
 };
 
 // Beautiful email template with inline styles
-const getEmailTemplate = (type, data) => {
+export const getEmailTemplate = (type, data) => {
   const baseStyle = '';
   let content = '';
 
@@ -653,7 +506,7 @@ const getEmailTemplate = (type, data) => {
               ` : ''}
             </div>
 
-            <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 12px 0;">Your tracking number will be sent in the evening of the day its shipped out in a seperate email, you'll also find it on track-order page on the alluvi website.</p>
+            <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 12px 0;">Your tracking number will be sent in the evening of the day its shipped out in a seperate email, you'll also find it on track-order page on the ${storeName} website.</p>
 
             <p style="font-size: 15px; line-height: 1.7; color: #4a4a4a; margin: 0 0 16px 0;">You can also track your order in the Track Order page.</p>
 
@@ -1623,87 +1476,40 @@ export const sendEmail = async (to, subject, type, data, opts = {}) => {
     }
 
     console.log('Attempting to send email:', { to, subject, type });
-    console.log('Email user:', process.env.EMAIL_USER);
-    console.log('Email pass configured:', !!process.env.EMAIL_PASS);
 
     let htmlContent = getEmailTemplate(type, data);
-    const mailjetApiKey = env('MAILJET_API_KEY');
-    const mailjetSecretKey = env('MAILJET_SECRET_KEY');
-    const mailjetFrom = env('MAILJET_SENDER_EMAIL');
-    const resendApiKey = env('RESEND_API_KEY');
 
-    console.log('Mailjet configured:', {
-      hasApiKey: !!mailjetApiKey,
-      hasSecretKey: !!mailjetSecretKey,
-      hasFrom: !!mailjetFrom,
-    });
-
-    const nodemailerAttachments = Array.isArray(opts?.attachments) ? opts.attachments : [];
-    const mailjetInlineAttachments = Array.isArray(opts?.mailjetInlineAttachments) ? opts.mailjetInlineAttachments : [];
+    // TurboSMTP is the only transport. Sender = the store's brand address
+    // (data.from / opts.from, set from brand-config) or orders@<store domain>,
+    // sent through the TurboSMTP account housing that domain.
+    const storeDomain = getStoreDomain(data);
+    const fromEmail = String(opts?.from || data?.from || (storeDomain ? `orders@${storeDomain}` : '')).trim();
+    if (!fromEmail) {
+      return { success: false, error: 'No sender address for this store (missing brand from / store domain)' };
+    }
+    const senderDomain = fromEmail.split('@')[1] || storeDomain;
+    const fromNameRaw = String(opts?.fromName || data?.fromName || getStoreName(storeDomain, data) || senderDomain).trim();
+    const fromName = /klyme/i.test(fromNameRaw) ? senderDomain : fromNameRaw;
     const headers = (opts && typeof opts === 'object' && opts.headers && typeof opts.headers === 'object') ? opts.headers : {};
     const plainText = (opts && typeof opts.text === 'string' && opts.text.trim()) ? opts.text : '';
 
-    if (resendApiKey) {
-      console.log('Email provider selected: resend');
-
-      try {
-        const publicBase = String(env('PUBLIC_BASE_URL', env('PUBLIC_API_BASE_URL', env('FRONTEND_URL', 'https://alluvi.org')))).replace(/\/$/, '');
-        const logoUrl = `${publicBase}/images/Alluvi-logo-2-white.png`;
-        htmlContent = String(htmlContent || '').replaceAll(`cid:${ALLUVI_LOGO_CID}`, logoUrl);
-      } catch {}
-
-      const r = await sendEmailViaResend({ to, subject, html: htmlContent, text: plainText, headers, from: opts?.from, fromName: opts?.fromName });
-      if (!r?.success) {
-        console.error(' Resend send failed:', r?.error, r?.details ? { details: r.details } : '');
-        return { success: false, error: r?.error || 'Resend send failed' };
-      }
-      console.log(' Email sent successfully:', r.messageId);
-      return { success: true, messageId: r.messageId };
-    }
-
-    if (mailjetApiKey && mailjetSecretKey && mailjetFrom) {
-      console.log('Email provider selected: mailjet');
-      const r = await sendEmailViaMailjet({ to, subject, html: htmlContent, text: plainText, inlineAttachments: mailjetInlineAttachments, headers });
-      if (!r?.success) {
-        console.error(' Mailjet send failed:', r?.error, r?.details ? { details: r.details } : '');
-        return { success: false, error: r?.error || 'Mailjet send failed' };
-      }
-      console.log(' Email sent successfully:', r.messageId);
-      return { success: true, messageId: r.messageId };
-    }
-
-    console.log('Email provider selected: nodemailer');
-
-    const transporter = createTransporter();
-
-    const nodemailerFromEmail = env('EMAIL_FROM_EMAIL', process.env.EMAIL_USER || 'info@alluvi.org');
-    const nodemailerFromDomain = getStoreDomain(data) || nodemailerFromEmail.split('@')[1] || 'alluvi.org';
-    const nodemailerFromNameRaw = env('EMAIL_FROM_NAME', nodemailerFromDomain);
-    const nodemailerFromName = /klyme/i.test(nodemailerFromNameRaw) ? nodemailerFromDomain : nodemailerFromNameRaw;
-
-    const mailOptions = {
-      from: `${nodemailerFromName} <${nodemailerFromEmail}>`,
-      to: to,
-      subject: subject,
+    const r = await sendViaTurboSmtp({
+      domain: senderDomain,
+      from: fromEmail,
+      fromName,
+      to,
+      subject,
       html: htmlContent,
-      ...(plainText ? { text: plainText } : {}),
-      ...(headers && typeof headers === 'object' && Object.keys(headers).length ? { headers } : {}),
-      ...(nodemailerAttachments.length ? { attachments: nodemailerAttachments } : {})
-    };
-
-    console.log('Sending mail with options (subject only):', { subject: mailOptions.subject, to: mailOptions.to });
-    
-    // Add timeout wrapper
-    const sendWithTimeout = Promise.race([
-      transporter.sendMail(mailOptions),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Email sending timeout after 15 seconds')), 15000)
-      )
-    ]);
-    
-    const info = await sendWithTimeout;
-    console.log('✅ Email sent successfully:', info.messageId);
-    return { success: true, messageId: info.messageId };
+      text: plainText,
+      headers: Object.fromEntries(Object.entries(headers).filter(([, v]) => v !== undefined && v !== null && v !== '')),
+      attachments: Array.isArray(opts?.attachments) ? opts.attachments : [],
+    });
+    if (!r?.success) {
+      console.error(' TurboSMTP send failed:', r?.error);
+      return { success: false, error: r?.error || 'TurboSMTP send failed' };
+    }
+    console.log(' Email sent successfully:', r.messageId);
+    return { success: true, messageId: r.messageId };
   } catch (error) {
     console.error('❌ Error sending email:', error);
     console.error('Email error details:', error.message);
@@ -1787,10 +1593,8 @@ export const sendPaymentSuccessfulEmail = async (to, data = {}) => {
     data,
     (() => {
       const nm = getAlluviLogoInlineAttachmentForNodemailer();
-      const mj = getAlluviLogoInlineAttachmentForMailjet();
       return {
         attachments: nm ? [nm] : [],
-        mailjetInlineAttachments: mj ? [mj] : [],
         from: data?.from,
         fromName: data?.fromName,
       };
@@ -1807,10 +1611,8 @@ export const sendKlymePaymentSuccessfulEmail = async (to, data = {}) => {
     data,
     (() => {
       const nm = getAlluviLogoInlineAttachmentForNodemailer();
-      const mj = getAlluviLogoInlineAttachmentForMailjet();
       return {
         attachments: nm ? [nm] : [],
-        mailjetInlineAttachments: mj ? [mj] : [],
       };
     })()
   );
@@ -1825,10 +1627,8 @@ export const sendPaymentDeclinedEmail = async (to, data = {}) => {
     data,
     (() => {
       const nm = getAlluviLogoInlineAttachmentForNodemailer();
-      const mj = getAlluviLogoInlineAttachmentForMailjet();
       return {
         attachments: nm ? [nm] : [],
-        mailjetInlineAttachments: mj ? [mj] : [],
         from: data?.from,
         fromName: data?.fromName,
       };
@@ -1845,10 +1645,8 @@ export const sendPaymentScreenshotReceivedEmail = async (to, data = {}) => {
     data,
     (() => {
       const nm = getAlluviLogoInlineAttachmentForNodemailer();
-      const mj = getAlluviLogoInlineAttachmentForMailjet();
       return {
         attachments: nm ? [nm] : [],
-        mailjetInlineAttachments: mj ? [mj] : [],
       };
     })()
   );
@@ -1863,10 +1661,8 @@ export const sendDeliveryInformationEmail = async (to, data = {}) => {
     data,
     (() => {
       const nm = getAlluviLogoInlineAttachmentForNodemailer();
-      const mj = getAlluviLogoInlineAttachmentForMailjet();
       return {
         attachments: nm ? [nm] : [],
-        mailjetInlineAttachments: mj ? [mj] : [],
       };
     })()
   );
@@ -1881,10 +1677,8 @@ export const sendKlymePaymentRejectedEmail = async (to, data = {}) => {
     data,
     (() => {
       const nm = getAlluviLogoInlineAttachmentForNodemailer();
-      const mj = getAlluviLogoInlineAttachmentForMailjet();
       return {
         attachments: nm ? [nm] : [],
-        mailjetInlineAttachments: mj ? [mj] : [],
       };
     })()
   );
@@ -1899,10 +1693,8 @@ export const sendRefundInitiatedEmail = async (to, data = {}) => {
     data,
     (() => {
       const nm = getAlluviLogoInlineAttachmentForNodemailer();
-      const mj = getAlluviLogoInlineAttachmentForMailjet();
       return {
         attachments: nm ? [nm] : [],
-        mailjetInlineAttachments: mj ? [mj] : [],
       };
     })()
   );
@@ -1969,10 +1761,8 @@ export const sendAffiliateWelcomeEmail = async (to, data = {}) => {
     data,
     (() => {
       const nm = getAlluviLogoInlineAttachmentForNodemailer();
-      const mj = getAlluviLogoInlineAttachmentForMailjet();
       return {
         attachments: nm ? [nm] : [],
-        mailjetInlineAttachments: mj ? [mj] : [],
       };
     })()
   );
@@ -1987,10 +1777,8 @@ export const sendAffiliateRewardNotificationEmail = async (to, data = {}) => {
     data,
     (() => {
       const nm = getAlluviLogoInlineAttachmentForNodemailer();
-      const mj = getAlluviLogoInlineAttachmentForMailjet();
       return {
         attachments: nm ? [nm] : [],
-        mailjetInlineAttachments: mj ? [mj] : [],
       };
     })()
   );
@@ -2035,10 +1823,8 @@ export const sendNewsletterEntryEmail = async (to, data = {}) => {
     data,
     (() => {
       const nm = getAlluviLogoInlineAttachmentForNodemailer();
-      const mj = getAlluviLogoInlineAttachmentForMailjet();
       return {
         attachments: nm ? [nm] : [],
-        mailjetInlineAttachments: mj ? [mj] : [],
         text,
         headers: {
           'List-Unsubscribe': `<${getNewsletterUnsubscribeMailto(data)}>`,
@@ -2087,15 +1873,13 @@ export const sendNewsletterWinnerEmail = async (to, data = {}) => {
     data,
     (() => {
       const nm = getAlluviLogoInlineAttachmentForNodemailer();
-      const mj = getAlluviLogoInlineAttachmentForMailjet();
       return {
         attachments: nm ? [nm] : [],
-        mailjetInlineAttachments: mj ? [mj] : [],
         text,
         headers: {
           // Winner is technically transactional — no unsubscribe required, but including it
           // doesn't hurt and is a positive signal to Gmail's classifier.
-          'List-Unsubscribe': `<${NEWSLETTER_UNSUBSCRIBE_MAILTO}>`,
+          'List-Unsubscribe': `<${getNewsletterUnsubscribeMailto(data)}>`,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
           'X-Entity-Ref-ID': `newsletter-winner-${Date.now()}`,
         },

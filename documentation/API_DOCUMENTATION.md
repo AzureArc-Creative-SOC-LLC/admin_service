@@ -1678,6 +1678,7 @@ Creates a wholesale order **and** deducts inventory from `wholesale_product_inve
 | `from` | date filter — `YYYY-MM-DD` or ISO datetime |
 | `to` | date filter — `YYYY-MM-DD` or ISO datetime |
 | `limit` | default 100, max 500 |
+| `include_unsubscribed` | `1` to include rows with `unsubscribed_at` set. Default: hidden. |
 | `offset` | default 0 |
 
 **Response `200`:**
@@ -1693,13 +1694,14 @@ Creates a wholesale order **and** deducts inventory from `wholesale_product_inve
       "ip_address": "1.2.3.4",
       "user_agent": "Mozilla/5.0...",
       "is_winner": false,
+      "unsubscribed_at": null,
       "created_at": "2025-01-01T12:00:00Z"
     }
   ]
 }
 ```
 
-> No `success` key at top level.
+> No `success` key at top level. `unsubscribed_at` is set by user-order-service when the subscriber follows the one-click unsubscribe link in the Bench Programme email; such rows are excluded unless `include_unsubscribed=1`.
 
 ---
 
@@ -1728,11 +1730,11 @@ Automatically sends a winner celebration email on the first time a subscriber is
 
 ### GET `/api/admin/newsletter/export.csv`
 
-**Query params:** same as `GET /api/admin/newsletter` (`q`, `from`, `to`)
+**Query params:** same as `GET /api/admin/newsletter` (`q`, `from`, `to`, `include_unsubscribed`). Unsubscribed rows are excluded by default — the export must respect opt-outs.
 
 **Response:** CSV file download (`Content-Type: text/csv; charset=utf-8`)
 
-CSV columns: `id`, `email`, `consent`, `source`, `ip_address`, `is_winner`, `created_at`
+CSV columns: `id`, `email`, `consent`, `source`, `is_winner`, `unsubscribed_at`, `created_at`
 
 ---
 
